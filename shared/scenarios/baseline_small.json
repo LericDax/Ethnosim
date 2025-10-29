@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "baseline_small",
+  "world": {
+    "width": 100,
+    "height": 100,
+    "terrain": {
+      "town_radius": 10,
+      "plain_radius": 30
+    }
+  },
+  "tick": {
+    "minutes_per_tick": 5
+  },
+  "population": {
+    "initial_adults": 6
+  },
+  "authorities": {
+    "houses": [
+      { "id": "H1", "authority": 0.5 },
+      { "id": "H2", "authority": 0.5 }
+    ],
+    "city": { "id": "C1", "authority": 0.7 }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "TeenMind_v1",
+  "nodes": [
+    { "id": "ProveMyself", "base_freq": 1.0, "duration": 6, "tags": ["status", "risk", "outward"] },
+    { "id": "ShowLoyalty", "base_freq": 1.0, "duration": 6, "tags": ["loyalty", "ritual", "inward"] },
+    { "id": "SneakAndHoard", "base_freq": 0.9, "duration": 6, "tags": ["resource", "selfish", "resentment"] },
+    { "id": "ChallengeBorder", "base_freq": 0.9, "duration": 6, "tags": ["border", "territorial", "risk"] },
+    { "id": "CourtAlly", "base_freq": 0.8, "duration": 6, "tags": ["social", "bonding", "future_pair"] }
+  ],
+  "edges": [
+    ["ProveMyself", "ShowLoyalty", 0.7],
+    ["ProveMyself", "SneakAndHoard", 0.6],
+    ["ProveMyself", "ChallengeBorder", 0.8],
+    ["ShowLoyalty", "ProveMyself", 0.7],
+    ["ShowLoyalty", "CourtAlly", 0.7],
+    ["SneakAndHoard", "ProveMyself", 0.6],
+    ["SneakAndHoard", "ChallengeBorder", 0.7],
+    ["ChallengeBorder", "ProveMyself", 0.6],
+    ["ChallengeBorder", "CourtAlly", 0.5],
+    ["CourtAlly", "ShowLoyalty", 0.8],
+    ["CourtAlly", "ProveMyself", 0.6]
+  ],
+  "start_node": "ProveMyself"
+}
