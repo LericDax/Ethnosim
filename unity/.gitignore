@@ -1,0 +1,49 @@
+# Unity specific folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Mm]emoryCaptures/
+UserSettings/
+
+# Asset Store tools
+[Aa]sset[Ss]tore/
+
+# Crash Reports
+sysinfo.txt
+
+# Collaborate metadata
+**/CollabSnapshot/
+
+# Local configuration
+*.csproj
+*.unityproj
+*.sln
+*.user
+*.suo
+*.tmp
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Packages
+Packages/packages-lock.json
+
+# Generated
+/Logs/
+/Library/
+/Temp/
+/Obj/
+/Build/
+/Builds/
+/UserSettings/
+
+# Rider
+.idea/
+*.DotSettings.user

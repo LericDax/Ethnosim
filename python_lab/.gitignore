@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Virtual environments
+.venv/
+.env/
+venv/
+
+# Unit test / coverage reports
+.pytest_cache/
+.coverage*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Local data or output caches
+out/
+
+# Miscellaneous
+*.log
