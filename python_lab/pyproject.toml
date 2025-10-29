@@ -1,14 +1,19 @@
-[project]
-name = "star-nexus-python-lab"
-version = "0.0.1"
-description = "Experimental Python lab for the Star Nexus simulation."
-authors = [{ name = "Star Nexus Team" }]
-requires-python = ">=3.11"
-dependencies = []
-
 [tool.poetry]
-# Placeholder section for future Poetry configuration.
+name = "snx"
+version = "0.1.0"
+description = "Star Nexus Python lab experiments and prototyping playground."
+authors = ["Star Nexus Team <devnull@starnexus.example>"]
+readme = "README.md"
+packages = [{ include = "snx", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+pydantic = "^2.6"
+numpy = "^1.26"
+
+[tool.poetry.group.viz.dependencies]
+matplotlib = "^3.8"
 
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
