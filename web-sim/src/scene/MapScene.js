@@ -13,16 +13,11 @@ import { getAgentMaterial, getTerrainMaterial } from './materials.js';
 const AGENT_GEOMETRY = new CircleGeometry(0.4, 24);
 const TERRAIN_DEPTH = -0.01;
 
-/**
- * Builds the primary visualization scene graph for Star Nexus.
- */
 export class MapScene {
-  /**
-   * @param {{worldWidth?:number, worldHeight?:number}} [options]
-   */
   constructor({ worldWidth = 100, worldHeight = 100 } = {}) {
     this.worldWidth = worldWidth;
     this.worldHeight = worldHeight;
+
     this.scene = new Scene();
     this.scene.background = new Color(0x05070a);
 
@@ -33,11 +28,10 @@ export class MapScene {
     this._buildTerrain();
     this._buildOverlayPlaceholders();
 
-    /** @type {Map<string, Mesh>} */
-    this.agentMeshes = new Map();
     this.agentLayer = new Group();
     this.agentLayer.name = 'agents';
     this.root.add(this.agentLayer);
+    this.agentMeshes = new Map();
 
     this.latestSnapshot = null;
   }
@@ -75,15 +69,9 @@ export class MapScene {
   _buildOverlayPlaceholders() {
     this.overlayRoot = new Group();
     this.overlayRoot.name = 'overlays';
-    this.overlayRoot.visible = true;
     this.root.add(this.overlayRoot);
   }
 
-  /**
-   * Ensures a mesh exists for the provided agent id.
-   * @param {import('../util/snapshotTypes.js').SnapshotAgent} agent
-   * @returns {Mesh}
-   */
   _getOrCreateAgentMesh(agent) {
     let mesh = this.agentMeshes.get(agent.id);
     if (!mesh) {
@@ -97,38 +85,31 @@ export class MapScene {
     return mesh;
   }
 
-  /**
-   * Update scene content from a simulation snapshot message.
-   * @param {import('../util/snapshotTypes.js').Snapshot|{type?:string,snapshot?:import('../util/snapshotTypes.js').Snapshot}} payload
-   */
   updateFromSnapshot(payload) {
     const snapshot = payload?.snapshot ?? payload;
     if (!snapshot || !Array.isArray(snapshot.agents)) {
       return;
     }
-    this.latestSnapshot = snapshot;
 
-    const seenIds = new Set();
+    this.latestSnapshot = snapshot;
+    const seen = new Set();
+
     for (const agent of snapshot.agents) {
       if (!agent || typeof agent.id !== 'string') continue;
       const mesh = this._getOrCreateAgentMesh(agent);
       mesh.material = getAgentMaterial(agent.lifeStage);
       mesh.position.set(agent.x ?? 0, agent.y ?? 0, mesh.position.z);
-      seenIds.add(agent.id);
+      seen.add(agent.id);
     }
 
     for (const [id, mesh] of this.agentMeshes) {
-      if (!seenIds.has(id)) {
+      if (!seen.has(id)) {
         this.agentLayer.remove(mesh);
         this.agentMeshes.delete(id);
       }
     }
   }
 
-  /**
-   * Alias for updateFromSnapshot to match shorter naming in tests.
-   * @param {any} payload
-   */
   update(payload) {
     this.updateFromSnapshot(payload);
   }

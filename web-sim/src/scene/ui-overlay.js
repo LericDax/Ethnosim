@@ -1,8 +1,3 @@
-/**
- * Creates a 2D overlay canvas layered above the Three.js renderer.
- * @param {HTMLElement} container
- * @returns {{canvas:HTMLCanvasElement, context:CanvasRenderingContext2D|null, resize:(w:number,h:number)=>void, draw:(snapshot:any)=>void}}
- */
 export function createOverlayCanvas(container) {
   const canvas = document.createElement('canvas');
   canvas.style.position = 'absolute';
@@ -28,9 +23,8 @@ export function createOverlayCanvas(container) {
     context.font = '12px sans-serif';
     context.textAlign = 'left';
     context.textBaseline = 'top';
-    const tickText = typeof snapshot.tick === 'number' ? `Tick ${snapshot.tick}` : '';
-    if (tickText) {
-      context.fillText(tickText, 12, 12);
+    if (typeof snapshot.tick === 'number') {
+      context.fillText(`Tick ${snapshot.tick}`, 12, 12);
     }
   };
 
