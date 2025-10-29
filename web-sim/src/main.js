@@ -1,10 +1,12 @@
 import { OrthographicCamera, WebGLRenderer } from 'three';
 import { MapScene } from './scene/MapScene.js';
 import { createOverlayCanvas } from './scene/ui-overlay.js';
+import { onSnapshot, sendInit } from './util/messageBus.js';
+
+/** @typedef {import('./util/snapshotTypes.js').Snapshot} Snapshot */
 
 const DEFAULT_WORLD = { width: 100, height: 100 };
 const INIT_MESSAGE = {
-  type: 'INIT',
   seed: 42,
   worldSize: [DEFAULT_WORLD.width, DEFAULT_WORLD.height],
   adults: 6,
@@ -55,17 +57,15 @@ const worker = new Worker(new URL('./sim/sim.worker.js', import.meta.url), {
   type: 'module',
 });
 
-worker.addEventListener('message', (event) => {
-  const message = event.data;
-  if (!message) return;
-  if (message.type === 'SNAPSHOT' || message.snapshot) {
-    const snapshot = message.snapshot ?? message;
+onSnapshot(
+  worker,
+  /** @param {Snapshot} snapshot */ (snapshot) => {
     mapScene.updateFromSnapshot(snapshot);
     overlay.draw(mapScene.latestSnapshot);
   }
-});
+);
 
-worker.postMessage(INIT_MESSAGE);
+sendInit(worker, INIT_MESSAGE);
 
 function renderLoop() {
   requestAnimationFrame(renderLoop);
