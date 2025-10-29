@@ -1,0 +1,51 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+
+# Vite / build artifacts
+dist/
+build/
+.vite/
+vite.config.ts.timestamp-*
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS / IDE junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# Temporary / cache
+tmp/
+temp/
+*.tmp
+.cache/
+.parcel-cache/
+coverage/
+logs/
+*.log
+
+# System files
+Icon?
+desktop.ini
+
+# Optional: ignore generated assets
+public/assets/generated/
+src/sim/data/generated/
+
+# Optional: Python lab crossover
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

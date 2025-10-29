@@ -1322,7 +1322,9 @@ Keep determinism and modularity.
 
 
 NOTE: Make sure to setup .gitignores in the individual sub units of the project, so an appropriate python one in the python labe, an appropriate one for node/three.js/etc in that project, and an appropriate one in the unity area
-NOTE2: In each subfolder, you can also create new AGENTS.md files. These files can be used to add specific rules or overrides to a folders contents, with nested logics. They can also be used to take notes on appropriate parts of the projects.
+NOTE2: In each subfolder, you can also create new AGENTS.md files. These files can be used to add specific rules or overrides to a folders contents, with nested logics. 
+NOTE3: Finish setting up node/three.js/vite 
+They can also be used to take notes on appropriate parts of the projects.
 
 Prepare for Unity ECS port by keeping data shapes stable.
 
