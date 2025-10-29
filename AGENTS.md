@@ -62,7 +62,7 @@ Reality:
 
 We will accept “janky but expressive” code here. It’s our research space.
 
-1.2 Browser Simulation Layer (web-sim/)
+1.2 Browser Simulation Layer (node/)
 
 Purpose:
 
@@ -136,7 +136,7 @@ star-nexus/
     out/
       runs/                # golden snapshot outputs from python
 
-  web-sim/
+  node/
     package.json
     vite.config.js or vite.config.ts
     public/
@@ -284,7 +284,7 @@ Each node has a base frequency (its inherent desire to fire) and nominal duratio
 The agent has a current_node and a node_timer. When timer hits 0, they pick next node via weighted choice.
 
 All brain definitions live in JSON files under:
-python_lab/data/brains/ and web-sim/src/sim/data/.
+python_lab/data/brains/ and node/src/sim/data/.
 
 These JSONs are canonical. Unity will import them.
 
@@ -1158,7 +1158,7 @@ We must aim for deterministic results (given same seed and tick order).
 
 Unity must import:
 
-The same brain JSONs from python_lab/data/brains/ or web-sim/src/sim/data/.
+The same brain JSONs from python_lab/data/brains/ or node/src/sim/data/.
 
 A world descriptor (100×100, radius thresholds).
 
@@ -1172,15 +1172,15 @@ For codegen / implementation agents, these are the immediate deliverables:
 
 python_lab/ with placeholder modules.
 
-web-sim/ with the described files.
+node/ with the described files.
 
 unity/ with placeholder Assets/StarNexus/Scripts/... etc.
 
-gpu/ stubs in web-sim/src/gpu/.
+gpu/ stubs in node/src/gpu/.
 
 10.2 Implement the browser sim worker skeleton
 
-web-sim/src/sim/sim.worker.js must:
+node/src/sim/sim.worker.js must:
 
 accept INIT
 
@@ -1192,7 +1192,7 @@ send SNAPSHOT objects to main thread
 
 10.3 Implement MapScene
 
-web-sim/src/scene/MapScene.js must:
+node/src/scene/MapScene.js must:
 
 create a three.js renderer, scene, and orthographic camera
 
@@ -1236,7 +1236,7 @@ brains.js: load BabyMind_v1.json, ChildMind_v1.json, TeenMind_v1.json, AdultMind
 
 10.5 Document the snapshot protocol
 
-In web-sim/src/util/snapshotTypes.js, define JSDoc typedefs:
+In node/src/util/snapshotTypes.js, define JSDoc typedefs:
 
 Snapshot
 

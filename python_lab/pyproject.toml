@@ -1,0 +1,14 @@
+[project]
+name = "star-nexus-python-lab"
+version = "0.0.1"
+description = "Experimental Python lab for the Star Nexus simulation."
+authors = [{ name = "Star Nexus Team" }]
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.poetry]
+# Placeholder section for future Poetry configuration.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
