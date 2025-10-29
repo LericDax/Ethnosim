@@ -1,0 +1,20 @@
+# General OS/editor cruft
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*.tmp
+*.bak
+*~
+.vscode/
+.idea/
+*.orig
+
+# Node module directories at repo root
+node_modules/
+
+# Delegate ignore rules to subprojects (see nested .gitignore files)
+!/python_lab/
+!/node/
+!/unity/
