@@ -1,3 +1,10 @@
-"""Visualization stubs for Star Nexus Python lab."""
+"""Visualisation helpers for the Star Nexus Python lab.
 
-# TODO: Implement matplotlib or alternative plotting helpers.
+Future work checklist:
+
+* Provide quick Matplotlib-backed charts for moods, demands, and brain states.
+* Keep plotting utilities optional so headless runs remain lightweight.
+* Surface colour palettes and legends aligned with the browser renderer.
+"""
+
+# TODO: Implement plotting helpers once data pipelines are available.

@@ -22,7 +22,10 @@ venv/
 .ipynb_checkpoints/
 
 # Local data or output caches
-out/
+out/*
+!out/runs/
+out/runs/*
+!out/runs/.gitkeep
 
 # Miscellaneous
 *.log
