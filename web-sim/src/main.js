@@ -1,7 +1,4 @@
-import {
-  OrthographicCamera,
-  WebGLRenderer,
-} from 'three';
+import { OrthographicCamera, WebGLRenderer } from 'three';
 import { MapScene } from './scene/MapScene.js';
 import { createOverlayCanvas } from './scene/ui-overlay.js';
 

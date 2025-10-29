@@ -22,27 +22,14 @@ const agentPalette = new Map([
 
 const agentMaterialCache = new Map();
 
-/**
- * Shared material for the ground plane.
- * @returns {MeshBasicMaterial}
- */
 export function getTerrainMaterial() {
   return terrainMaterial;
 }
 
-/**
- * Shared line material for grid overlays.
- * @returns {LineBasicMaterial}
- */
 export function getTerrainBorderMaterial() {
   return terrainBorderMaterial;
 }
 
-/**
- * Returns a cached material for the given life stage.
- * @param {string} stage
- * @returns {MeshBasicMaterial}
- */
 export function getAgentMaterial(stage = 'adult') {
   if (!agentMaterialCache.has(stage)) {
     const color = agentPalette.get(stage) ?? new Color(0xffffff);
@@ -54,12 +41,6 @@ export function getAgentMaterial(stage = 'adult') {
   return agentMaterialCache.get(stage);
 }
 
-/**
- * Update the palette for a life stage.
- * Allows future runtime tuning without recreating geometry.
- * @param {string} stage
- * @param {number|string|Color} color
- */
 export function setAgentStageColor(stage, color) {
   const resolved = color instanceof Color ? color : new Color(color);
   agentPalette.set(stage, resolved);
