@@ -1,8 +1,9 @@
-import { createBrainState, getCurrentNodeMetadata } from './brain.ts';
+import { createBrainState, getCurrentNodeMetadata, type BrainMultiplierSet } from './brain.ts';
 import { STAGE_BASE_SPEED, STAGE_BRAIN_IDS } from './aging.ts';
 import type { AgentState, SimulationState, Temperament } from '../sim.worker.ts';
 import type { RngStream } from './rng.ts';
 import { createFetusTemperament, applyGestationalStress } from './temperament.ts';
+import { createTraitProfile } from './traits.ts';
 
 const CONCEPTION_RATE_MULTIPLIER = 0.02;
 export const GESTATION_TICKS = 200;
@@ -116,6 +117,8 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
   const genderIdentity = genderRoll < 0.4 ? 'man' : genderRoll < 0.8 ? 'woman' : 'nonbinary';
 
   const brain = createBrainState(STAGE_BRAIN_IDS.baby);
+  const traitProfile = createTraitProfile(temperament);
+  brain.traitFlags = [...traitProfile.traitFlags];
   const brainMetadata = getCurrentNodeMetadata(brain);
 
   const parents: string[] = [parent.id];
@@ -135,7 +138,7 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     caregiverId: parent.id,
     explorationBias: simulation.rng.tick.nextFloat(),
     brain,
-    brainMultipliers: {},
+    brainMultipliers: buildBrainMultipliersFromProfile(traitProfile),
     brainNodeDuration: brainMetadata.duration,
     brainDecision: null,
     sexBody,
@@ -145,6 +148,30 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     bondPartnerId: null,
     parents,
     temperament,
+    traitFlags: [...traitProfile.traitFlags],
+    moods: buildInitialMoodStateFromProfile(traitProfile),
     houseId: parent.houseId,
   };
+}
+
+function buildBrainMultipliersFromProfile(
+  profile: ReturnType<typeof createTraitProfile>,
+): BrainMultiplierSet {
+  const multipliers: BrainMultiplierSet = { demand: {} };
+  if (profile.multipliers.mood) {
+    multipliers.mood = { ...profile.multipliers.mood };
+  }
+  if (profile.multipliers.personality) {
+    multipliers.personality = { ...profile.multipliers.personality };
+  }
+  return multipliers;
+}
+
+function buildInitialMoodStateFromProfile(
+  profile: ReturnType<typeof createTraitProfile>,
+): Record<string, number> {
+  if (Object.keys(profile.moodLevels).length === 0) {
+    return {};
+  }
+  return { ...profile.moodLevels };
 }

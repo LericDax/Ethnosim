@@ -4,11 +4,13 @@ import {
   tickBrain,
   type BrainState,
   type BrainDecision,
+  type BrainMultiplierSet,
   getCurrentNodeMetadata,
 } from './engine/brain.ts';
 import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
 import { createWorld, type WorldState } from './engine/world.ts';
 import { handleReproduction } from './engine/repro.ts';
+import { createTraitProfile } from './engine/traits.ts';
 import {
   assignAgentsToHouses,
   createInitialHouses,
@@ -58,6 +60,8 @@ export interface AgentState extends MovableAgent, HouseAssignableAgent {
   bondPartnerId: string | null;
   parents: string[];
   temperament: Temperament;
+  traitFlags: string[];
+  moods: Record<string, number>;
   brainNodeDuration: number;
 }
 
@@ -289,12 +293,14 @@ function createAgents(count: number, width: number, height: number, stream: RngS
     const lifeStage = LIFE_STAGES[i % LIFE_STAGES.length];
     const brainId = STAGE_BRAIN_IDS[lifeStage] ?? 'AdultMind_v1';
     const brain = createBrainState(brainId);
+    const temperament = createRandomTemperament(stream, lifeStage);
+    const traitProfile = createTraitProfile(temperament);
+    brain.traitFlags = [...traitProfile.traitFlags];
     const brainMetadata = getCurrentNodeMetadata(brain);
     const sexBody = stream.nextFloat() < 0.5 ? 'female' : 'male';
     const genderIdentity = sampleGenderIdentity(stream.nextFloat());
     const fertility =
       lifeStage === 'adult' && sexBody === 'female' ? 0.4 + stream.nextFloat() * 0.5 : 0;
-    const temperament = createRandomTemperament(stream, lifeStage);
     const baseSpeed = STAGE_BASE_SPEED[lifeStage] ?? 0;
     const speedVariance = lifeStage === 'baby' ? 0 : (stream.nextFloat() - 0.5) * 0.2;
     const ageLimit = STAGE_LIMITS[lifeStage];
@@ -315,7 +321,7 @@ function createAgents(count: number, width: number, height: number, stream: RngS
       caregiverId: null,
       explorationBias: stream.nextFloat(),
       brain,
-      brainMultipliers: {},
+      brainMultipliers: buildBrainMultipliers(traitProfile),
       brainNodeDuration: brainMetadata.duration,
       brainDecision: null,
       sexBody,
@@ -325,6 +331,8 @@ function createAgents(count: number, width: number, height: number, stream: RngS
       bondPartnerId: null,
       parents: [],
       temperament,
+      traitFlags: [...traitProfile.traitFlags],
+      moods: buildInitialMoodState(traitProfile),
       houseId: null,
     });
   }
@@ -388,6 +396,24 @@ function shuffleInPlace<T>(array: T[], stream: RngStream): void {
   }
 }
 
+function buildBrainMultipliers(profile: ReturnType<typeof createTraitProfile>): BrainMultiplierSet {
+  const multipliers: BrainMultiplierSet = { demand: {} };
+  if (profile.multipliers.mood) {
+    multipliers.mood = { ...profile.multipliers.mood };
+  }
+  if (profile.multipliers.personality) {
+    multipliers.personality = { ...profile.multipliers.personality };
+  }
+  return multipliers;
+}
+
+function buildInitialMoodState(profile: ReturnType<typeof createTraitProfile>): Record<string, number> {
+  if (Object.keys(profile.moodLevels).length === 0) {
+    return {};
+  }
+  return { ...profile.moodLevels };
+}
+
 function computeStageCounts(agents: AgentState[]): StageCounts {
   const counts: StageCounts = { baby: 0, child: 0, teen: 0, adult: 0 };
   for (const agent of agents) {
@@ -423,7 +449,7 @@ export function stepSimulationState(simulation: SimulationState): void {
   updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick);
 
   simulation.agents.forEach((agent) => {
-    const brainResult = tickBrain(agent.brain, agent.brainMultipliers);
+    const brainResult = tickBrain(agent.brain, agent.brainMultipliers, agent.moods);
     agent.brainNodeDuration = brainResult.nodeDuration;
     agent.brainDecision = brainResult.decision;
   });

@@ -4,6 +4,7 @@ import childMindRaw from '../data/ChildMind_v1.json?raw';
 import houseMindRaw from '../data/HouseMind_v1.json?raw';
 import teenMindRaw from '../data/TeenMind_v1.json?raw';
 import urbanMindRaw from '../data/UrbanMind_v1.json?raw';
+import { JUMP_EDGE_DEFINITIONS } from './traits.ts';
 
 export interface BrainNodeDefinition {
   id: string;
@@ -38,8 +39,18 @@ interface BrainGraphRuntime {
   name: string;
   nodes: Map<string, BrainNodeMetadata>;
   edgesFrom: Map<string, BrainEdgeMetadata[]>;
+  nodesByTag: Map<string, string[]>;
   startNodeId: string;
 }
+
+interface ActiveJumpEdgeState {
+  id: string;
+  sourceNodeIds: string[];
+  targetNodeId: string;
+  weight: number;
+}
+
+type JumpEdgeCooldownMap = Record<string, number>;
 
 export interface BrainDecisionFactor {
   nodeId: string;
@@ -63,6 +74,10 @@ export interface BrainState {
   currentNodeId: string;
   nodeTimer: number;
   lastDecision: BrainDecision | null;
+  traitFlags: string[];
+  activeJumpEdges: Map<string, ActiveJumpEdgeState>;
+  dynamicEdgesFrom: Map<string, BrainEdgeMetadata[]>;
+  jumpEdgeCooldowns: JumpEdgeCooldownMap;
 }
 
 export interface BrainMultiplierSet {
@@ -99,6 +114,7 @@ function parseBrainJson(raw: string): BrainGraphDefinition {
 
 function buildRuntimeGraph(definition: BrainGraphDefinition): BrainGraphRuntime {
   const nodes = new Map<string, BrainNodeMetadata>();
+  const nodesByTag = new Map<string, string[]>();
   for (const node of definition.nodes) {
     nodes.set(node.id, {
       id: node.id,
@@ -106,6 +122,13 @@ function buildRuntimeGraph(definition: BrainGraphDefinition): BrainGraphRuntime 
       duration: node.duration,
       tags: [...node.tags],
     });
+
+    for (const tag of node.tags) {
+      if (!nodesByTag.has(tag)) {
+        nodesByTag.set(tag, []);
+      }
+      nodesByTag.get(tag)!.push(node.id);
+    }
   }
 
   const edgesFrom = new Map<string, BrainEdgeMetadata[]>();
@@ -123,6 +146,7 @@ function buildRuntimeGraph(definition: BrainGraphDefinition): BrainGraphRuntime 
     name: definition.name,
     nodes,
     edgesFrom,
+    nodesByTag,
     startNodeId: definition.start_node,
   };
 }
@@ -157,39 +181,6 @@ function productForTags(tags: string[], map?: Record<string, number>): number {
   return product;
 }
 
-function evaluateCandidates(
-  brain: BrainGraphRuntime,
-  sourceNodeId: string,
-  multipliers: BrainMultiplierSet,
-): BrainDecisionFactor[] {
-  const sourceEdges = brain.edgesFrom.get(sourceNodeId);
-  if (!sourceEdges || sourceEdges.length === 0) {
-    return [];
-  }
-
-  const candidates: BrainDecisionFactor[] = [];
-  for (const edge of sourceEdges) {
-    const targetNode = requireNode(brain, edge.targetId);
-    const moodMultiplier = productForTags(targetNode.tags, multipliers.mood);
-    const personalityMultiplier = productForTags(targetNode.tags, multipliers.personality);
-    const demandMultiplier = productForTags(targetNode.tags, multipliers.demand);
-    const desirability =
-      edge.weight * targetNode.baseFrequency * moodMultiplier * personalityMultiplier * demandMultiplier;
-    candidates.push({
-      nodeId: targetNode.id,
-      desirability,
-      edgeWeight: edge.weight,
-      baseFrequency: targetNode.baseFrequency,
-      moodMultiplier,
-      personalityMultiplier,
-      demandMultiplier,
-      tags: targetNode.tags,
-    });
-  }
-  candidates.sort((a, b) => b.desirability - a.desirability || a.nodeId.localeCompare(b.nodeId));
-  return candidates;
-}
-
 export function createBrainState(brainId: string): BrainState {
   const brain = requireBrain(brainId);
   const startNode = requireNode(brain, brain.startNodeId);
@@ -198,6 +189,10 @@ export function createBrainState(brainId: string): BrainState {
     currentNodeId: startNode.id,
     nodeTimer: startNode.duration,
     lastDecision: null,
+    traitFlags: [],
+    activeJumpEdges: new Map(),
+    dynamicEdgesFrom: new Map(),
+    jumpEdgeCooldowns: {},
   };
 }
 
@@ -226,14 +221,19 @@ export interface BrainTickResult {
   decision: BrainDecision | null;
 }
 
-export function tickBrain(state: BrainState, multipliers: BrainMultiplierSet = {}): BrainTickResult {
+export function tickBrain(
+  state: BrainState,
+  multipliers: BrainMultiplierSet = {},
+  moodLevels: Record<string, number> = {},
+): BrainTickResult {
   const brain = requireBrain(state.brainId);
+  updateJumpEdges(state, brain, multipliers, moodLevels);
   let decision: BrainDecision | null = null;
 
   if (state.nodeTimer > 1) {
     state.nodeTimer -= 1;
   } else {
-    const candidates = evaluateCandidates(brain, state.currentNodeId, multipliers);
+    const candidates = evaluateCandidates(brain, state, state.currentNodeId, multipliers);
     const chosen = candidates.length > 0 ? candidates[0] : null;
     const nextNodeId = chosen ? chosen.nodeId : state.currentNodeId;
     decision = {
@@ -251,4 +251,176 @@ export function tickBrain(state: BrainState, multipliers: BrainMultiplierSet = {
     nodeDuration: metadata.duration,
     decision: decision ?? state.lastDecision,
   };
+}
+
+function evaluateCandidates(
+  brain: BrainGraphRuntime,
+  state: BrainState,
+  sourceNodeId: string,
+  multipliers: BrainMultiplierSet,
+): BrainDecisionFactor[] {
+  const baseEdges = brain.edgesFrom.get(sourceNodeId) ?? [];
+  const jumpEdges = state.dynamicEdgesFrom.get(sourceNodeId) ?? [];
+  const sourceEdges = baseEdges.length > 0 || jumpEdges.length > 0 ? [...baseEdges, ...jumpEdges] : [];
+  if (sourceEdges.length === 0) {
+    return [];
+  }
+
+  const candidates: BrainDecisionFactor[] = [];
+  for (const edge of sourceEdges) {
+    const targetNode = requireNode(brain, edge.targetId);
+    const moodMultiplier = productForTags(targetNode.tags, multipliers.mood);
+    const personalityMultiplier = productForTags(targetNode.tags, multipliers.personality);
+    const demandMultiplier = productForTags(targetNode.tags, multipliers.demand);
+    const desirability =
+      edge.weight * targetNode.baseFrequency * moodMultiplier * personalityMultiplier * demandMultiplier;
+    candidates.push({
+      nodeId: targetNode.id,
+      desirability,
+      edgeWeight: edge.weight,
+      baseFrequency: targetNode.baseFrequency,
+      moodMultiplier,
+      personalityMultiplier,
+      demandMultiplier,
+      tags: targetNode.tags,
+    });
+  }
+  candidates.sort((a, b) => b.desirability - a.desirability || a.nodeId.localeCompare(b.nodeId));
+  return candidates;
+}
+
+function updateJumpEdges(
+  state: BrainState,
+  brain: BrainGraphRuntime,
+  multipliers: BrainMultiplierSet,
+  moodLevels: Record<string, number>,
+): void {
+  const moodMap = multipliers.mood ?? {};
+  const traitSet = new Set(state.traitFlags);
+
+  for (const key of Object.keys(state.jumpEdgeCooldowns)) {
+    if (state.jumpEdgeCooldowns[key] > 0) {
+      state.jumpEdgeCooldowns[key] -= 1;
+      if (state.jumpEdgeCooldowns[key] <= 0) {
+        delete state.jumpEdgeCooldowns[key];
+      }
+    }
+  }
+
+  const activeEntries = Array.from(state.activeJumpEdges.entries());
+  for (const [edgeId, activeEdge] of activeEntries) {
+    const definition = JUMP_EDGE_DEFINITIONS.find((entry) => entry.id === edgeId);
+    if (!definition) {
+      state.activeJumpEdges.delete(edgeId);
+      continue;
+    }
+
+    const moodValue = resolveMoodLevel(definition.moodTrigger, moodMap, moodLevels);
+    if (moodValue <= definition.releaseThreshold) {
+      state.activeJumpEdges.delete(edgeId);
+      state.jumpEdgeCooldowns[edgeId] = definition.cooldownTicks;
+    }
+  }
+
+  for (const definition of JUMP_EDGE_DEFINITIONS) {
+    if (state.activeJumpEdges.has(definition.id)) {
+      continue;
+    }
+
+    if (definition.requiredTraits && definition.requiredTraits.some((trait) => !traitSet.has(trait))) {
+      continue;
+    }
+
+    if (state.jumpEdgeCooldowns[definition.id] && state.jumpEdgeCooldowns[definition.id] > 0) {
+      continue;
+    }
+
+    const resolved = resolveJumpEdge(brain, definition);
+    if (!resolved) {
+      continue;
+    }
+
+    const moodValue = resolveMoodLevel(definition.moodTrigger, moodMap, moodLevels);
+    if (moodValue < definition.activationThreshold) {
+      continue;
+    }
+
+    state.activeJumpEdges.set(definition.id, resolved);
+  }
+
+  state.dynamicEdgesFrom = rebuildDynamicEdgeMap(state.activeJumpEdges);
+}
+
+function resolveMoodLevel(
+  key: string,
+  multiplierMood: Record<string, number>,
+  moodLevels: Record<string, number>,
+): number {
+  if (Number.isFinite(moodLevels[key])) {
+    return moodLevels[key];
+  }
+  if (Number.isFinite(multiplierMood[key])) {
+    return multiplierMood[key];
+  }
+  return 1;
+}
+
+function resolveJumpEdge(
+  brain: BrainGraphRuntime,
+  definition: (typeof JUMP_EDGE_DEFINITIONS)[number],
+): ActiveJumpEdgeState | null {
+  const targetNode = brain.nodes.get(definition.targetNodeId);
+  if (!targetNode) {
+    return null;
+  }
+
+  const sourceNodeIds = new Set<string>();
+  if (definition.sourceNodes) {
+    for (const source of definition.sourceNodes) {
+      if (brain.nodes.has(source)) {
+        sourceNodeIds.add(source);
+      }
+    }
+  }
+  if (definition.sourceTags) {
+    for (const tag of definition.sourceTags) {
+      const taggedNodes = brain.nodesByTag.get(tag);
+      if (!taggedNodes) {
+        continue;
+      }
+      for (const nodeId of taggedNodes) {
+        sourceNodeIds.add(nodeId);
+      }
+    }
+  }
+
+  if (sourceNodeIds.size === 0) {
+    return null;
+  }
+
+  const weight = definition.weight * definition.activationChance;
+  return {
+    id: definition.id,
+    sourceNodeIds: Array.from(sourceNodeIds),
+    targetNodeId: definition.targetNodeId,
+    weight,
+  };
+}
+
+function rebuildDynamicEdgeMap(
+  activeJumpEdges: Map<string, ActiveJumpEdgeState>,
+): Map<string, BrainEdgeMetadata[]> {
+  const map = new Map<string, BrainEdgeMetadata[]>();
+  for (const activeEdge of activeJumpEdges.values()) {
+    for (const sourceNodeId of activeEdge.sourceNodeIds) {
+      if (!map.has(sourceNodeId)) {
+        map.set(sourceNodeId, []);
+      }
+      map.get(sourceNodeId)!.push({
+        targetId: activeEdge.targetNodeId,
+        weight: activeEdge.weight,
+      });
+    }
+  }
+  return map;
 }
