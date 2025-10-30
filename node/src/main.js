@@ -8,7 +8,7 @@ if (!container) {
 const scene = new MapScene({ container });
 scene.resizeToDisplay();
 
-const worker = new Worker(new URL('./sim/sim.worker.js', import.meta.url), {
+const worker = new Worker(new URL('./sim/sim.worker.ts', import.meta.url), {
   type: 'module',
 });
 
