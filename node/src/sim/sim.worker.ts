@@ -233,7 +233,7 @@ function createAgents(count: number, width: number, height: number, stream: RngS
     const genderIdentity = sampleGenderIdentity(stream.nextFloat());
     const fertility =
       lifeStage === 'adult' && sexBody === 'female' ? 0.4 + stream.nextFloat() * 0.5 : 0;
-    const temperament = createRandomTemperament(stream);
+    const temperament = createRandomTemperament(stream, lifeStage);
     const baseSpeed = STAGE_BASE_SPEED[lifeStage] ?? 0;
     const speedVariance = lifeStage === 'baby' ? 0 : (stream.nextFloat() - 0.5) * 0.2;
     const ageLimit = STAGE_LIMITS[lifeStage];
@@ -295,14 +295,15 @@ function createAgents(count: number, width: number, height: number, stream: RngS
   return agents;
 }
 
-function createRandomTemperament(stream: RngStream): Temperament {
+function createRandomTemperament(stream: RngStream, lifeStage: LifeStage): Temperament {
+  const range = lifeStage === 'adult' ? 0.5 : 0.6;
   return {
-    trustBias: clamp01(0.2 + stream.nextFloat() * 0.6),
-    fearBias: clamp01(0.2 + stream.nextFloat() * 0.6),
-    loyaltyBias: clamp01(0.2 + stream.nextFloat() * 0.6),
-    resentmentBias: clamp01(0.2 + stream.nextFloat() * 0.6),
-    territorialBias: clamp01(0.2 + stream.nextFloat() * 0.6),
-    zealBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+    trustBias: clamp01(0.2 + stream.nextFloat() * range),
+    fearBias: clamp01(0.2 + stream.nextFloat() * range),
+    loyaltyBias: clamp01(0.2 + stream.nextFloat() * range),
+    resentmentBias: clamp01(0.2 + stream.nextFloat() * range),
+    territorialBias: clamp01(0.2 + stream.nextFloat() * range),
+    zealBias: clamp01(0.2 + stream.nextFloat() * range),
   };
 }
 

@@ -2,18 +2,10 @@ import { createBrainState, getCurrentNodeMetadata } from './brain.ts';
 import { STAGE_BASE_SPEED, STAGE_BRAIN_IDS } from './aging.ts';
 import type { AgentState, SimulationState, Temperament } from '../sim.worker.ts';
 import type { RngStream } from './rng.ts';
+import { createFetusTemperament, applyGestationalStress } from './temperament.ts';
 
 const CONCEPTION_RATE_MULTIPLIER = 0.02;
 export const GESTATION_TICKS = 200;
-const TEMPERAMENT_NOISE_RANGE = 0.05;
-const TEMPERAMENT_KEYS: Array<keyof Temperament> = [
-  'trustBias',
-  'fearBias',
-  'loyaltyBias',
-  'resentmentBias',
-  'territorialBias',
-  'zealBias',
-];
 
 export function handleReproduction(simulation: SimulationState): void {
   const rng = simulation.rng.tick;
@@ -77,16 +69,6 @@ export function handleReproduction(simulation: SimulationState): void {
   }
 }
 
-function createFetusTemperament(a: Temperament, b: Temperament, rng: RngStream): Temperament {
-  const temperament: Temperament = { ...a };
-  for (const key of TEMPERAMENT_KEYS) {
-    const average = (a[key] + b[key]) / 2;
-    const noise = (rng.nextFloat() * 2 - 1) * TEMPERAMENT_NOISE_RANGE;
-    temperament[key] = clamp01(average + noise);
-  }
-  return temperament;
-}
-
 function progressGestation(agent: AgentState, simulation: SimulationState, rng: RngStream): void {
   const pregnancy = agent.pregnancy;
   if (!pregnancy) {
@@ -98,10 +80,7 @@ function progressGestation(agent: AgentState, simulation: SimulationState, rng: 
     pregnancy.timeRemaining = 0;
   }
   const stress = computeGestationalStress(agent, simulation, rng);
-  pregnancy.fetusTemperament.fearBias = clamp01(pregnancy.fetusTemperament.fearBias + 0.01 * stress);
-  pregnancy.fetusTemperament.territorialBias = clamp01(
-    pregnancy.fetusTemperament.territorialBias + 0.005 * stress,
-  );
+  applyGestationalStress(pregnancy.fetusTemperament, stress);
 
   if (pregnancy.timeRemaining > 0) {
     return;
@@ -167,14 +146,4 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     parents,
     temperament,
   };
-}
-
-function clamp01(value: number): number {
-  if (value <= 0) {
-    return 0;
-  }
-  if (value >= 1) {
-    return 1;
-  }
-  return value;
 }
