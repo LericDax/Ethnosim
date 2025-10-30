@@ -9,10 +9,47 @@ import {
 } from './engine/brain.ts';
 import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
 import { createWorld, type WorldState } from './engine/world.ts';
+import { handleReproduction } from './engine/repro.ts';
+import {
+  stepAging,
+  STAGE_BASE_SPEED,
+  STAGE_BRAIN_IDS,
+  STAGE_LIMITS,
+} from './engine/aging.ts';
 
-type LifeStage = MovableAgent['lifeStage'];
+export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
-interface AgentState extends MovableAgent {
+export interface Temperament {
+  trustBias: number;
+  fearBias: number;
+  loyaltyBias: number;
+  resentmentBias: number;
+  territorialBias: number;
+  zealBias: number;
+}
+
+export interface PregnancyState {
+  timeRemaining: number;
+  fetusTemperament: Temperament;
+  coParentId: string | null;
+}
+
+export interface StageCounts {
+  baby: number;
+  child: number;
+  teen: number;
+  adult: number;
+}
+
+export interface AgentState extends MovableAgent {
+  ageTicks: number;
+  sexBody: 'male' | 'female';
+  genderIdentity: 'man' | 'woman' | 'nonbinary';
+  fertility: number;
+  pregnancy: PregnancyState | null;
+  bondPartnerId: string | null;
+  parents: string[];
+  temperament: Temperament;
   brainMultipliers: BrainMultiplierSet;
   brainNodeDuration: number;
 }
@@ -29,6 +66,8 @@ export interface SimulationState {
   world: WorldState;
   agents: AgentState[];
   rng: SimulationRng;
+  stageCounts: StageCounts;
+  nextAgentId: number;
 }
 
 export interface SimulationConfig {
@@ -63,6 +102,7 @@ export interface Snapshot {
   agents: SnapshotAgent[];
   houses: [];
   city: null;
+  stats: StageCounts;
 }
 
 interface WorkerInitMessage {
@@ -162,6 +202,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
 
   const world = createWorld(width, height, worldStream);
   const agents = createAgents(config.agentCount, width, height, agentStream);
+  const stageCounts = computeStageCounts(agents);
 
   return {
     tick: 0,
@@ -173,6 +214,8 @@ export function createSimulationState(config: SimulationConfig): SimulationState
       agentSpawn: agentStream,
       tick: tickStream,
     },
+    stageCounts,
+    nextAgentId: agents.length,
   };
 }
 
@@ -182,15 +225,30 @@ function createAgents(count: number, width: number, height: number, stream: RngS
   const centerY = (height - 1) / 2;
   const homeRadius = Math.min(width, height) * 0.1;
   for (let i = 0; i < count; i += 1) {
-    const brain = createBrainState('AdultMind_v1');
-    const brainMetadata = getCurrentNodeMetadata(brain);
     const lifeStage = LIFE_STAGES[i % LIFE_STAGES.length];
+    const brainId = STAGE_BRAIN_IDS[lifeStage] ?? 'AdultMind_v1';
+    const brain = createBrainState(brainId);
+    const brainMetadata = getCurrentNodeMetadata(brain);
+    const sexBody = stream.nextFloat() < 0.5 ? 'female' : 'male';
+    const genderIdentity = sampleGenderIdentity(stream.nextFloat());
+    const fertility =
+      lifeStage === 'adult' && sexBody === 'female' ? 0.4 + stream.nextFloat() * 0.5 : 0;
+    const temperament = createRandomTemperament(stream);
+    const baseSpeed = STAGE_BASE_SPEED[lifeStage] ?? 0;
+    const speedVariance = lifeStage === 'baby' ? 0 : (stream.nextFloat() - 0.5) * 0.2;
+    const ageLimit = STAGE_LIMITS[lifeStage];
+    const ageTicks =
+      typeof ageLimit === 'number' && ageLimit > 0
+        ? Math.floor(stream.nextFloat() * Math.max(1, Math.floor(ageLimit * 0.75)))
+        : 0;
+
     agents.push({
       id: `agent-${i}`,
       x: stream.nextFloat() * width,
       y: stream.nextFloat() * height,
       lifeStage,
-      speed: 0.4 + stream.nextFloat() * 0.6,
+      ageTicks,
+      speed: Math.max(0, baseSpeed + speedVariance),
       homeX: centerX + (stream.nextFloat() - 0.5) * homeRadius,
       homeY: centerY + (stream.nextFloat() - 0.5) * homeRadius,
       caregiverId: null,
@@ -199,6 +257,13 @@ function createAgents(count: number, width: number, height: number, stream: RngS
       brainMultipliers: {},
       brainNodeDuration: brainMetadata.duration,
       brainDecision: null,
+      sexBody,
+      genderIdentity,
+      fertility,
+      pregnancy: null,
+      bondPartnerId: null,
+      parents: [],
+      temperament,
     });
   }
 
@@ -210,15 +275,86 @@ function createAgents(count: number, width: number, height: number, stream: RngS
         agent.caregiverId = caregiver.id;
       }
       if (agent.lifeStage === 'baby') {
-        agent.speed = 0;
+        agent.speed = STAGE_BASE_SPEED.baby;
       }
     }
   });
+
+  const adultFemales = adults.filter((agent) => agent.sexBody === 'female');
+  const adultMales = adults.filter((agent) => agent.sexBody === 'male');
+  shuffleInPlace(adultFemales, stream);
+  shuffleInPlace(adultMales, stream);
+  const pairCount = Math.min(adultFemales.length, adultMales.length);
+  for (let i = 0; i < pairCount; i += 1) {
+    const female = adultFemales[i];
+    const male = adultMales[i];
+    female.bondPartnerId = male.id;
+    male.bondPartnerId = female.id;
+  }
+
   return agents;
+}
+
+function createRandomTemperament(stream: RngStream): Temperament {
+  return {
+    trustBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+    fearBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+    loyaltyBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+    resentmentBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+    territorialBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+    zealBias: clamp01(0.2 + stream.nextFloat() * 0.6),
+  };
+}
+
+function sampleGenderIdentity(sample: number): AgentState['genderIdentity'] {
+  if (sample < 0.4) {
+    return 'man';
+  }
+  if (sample < 0.8) {
+    return 'woman';
+  }
+  return 'nonbinary';
+}
+
+function shuffleInPlace<T>(array: T[], stream: RngStream): void {
+  for (let i = array.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(stream.nextFloat() * (i + 1));
+    const temp = array[i];
+    array[i] = array[j];
+    array[j] = temp;
+  }
+}
+
+function computeStageCounts(agents: AgentState[]): StageCounts {
+  const counts: StageCounts = { baby: 0, child: 0, teen: 0, adult: 0 };
+  for (const agent of agents) {
+    if (agent.lifeStage === 'baby') {
+      counts.baby += 1;
+    } else if (agent.lifeStage === 'child') {
+      counts.child += 1;
+    } else if (agent.lifeStage === 'teen') {
+      counts.teen += 1;
+    } else if (agent.lifeStage === 'adult') {
+      counts.adult += 1;
+    }
+  }
+  return counts;
+}
+
+function clamp01(value: number): number {
+  if (value <= 0) {
+    return 0;
+  }
+  if (value >= 1) {
+    return 1;
+  }
+  return value;
 }
 
 export function stepSimulationState(simulation: SimulationState): void {
   simulation.tick += 1;
+
+  handleReproduction(simulation);
 
   simulation.agents.forEach((agent) => {
     const brainResult = tickBrain(agent.brain, agent.brainMultipliers);
@@ -239,6 +375,10 @@ export function stepSimulationState(simulation: SimulationState): void {
   simulation.agents.forEach((agent) => {
     moveAgent(agent, movementContext, simulation.rng.tick);
   });
+
+  stepAging(simulation);
+
+  simulation.stageCounts = computeStageCounts(simulation.agents);
 }
 
 export function createSnapshot(simulation: SimulationState): Snapshot {
@@ -256,6 +396,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
     })),
     houses: [],
     city: null,
+    stats: { ...simulation.stageCounts },
   };
 }
 
