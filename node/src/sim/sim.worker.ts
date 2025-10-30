@@ -1,4 +1,12 @@
 import { createSeededRng, type SeededRng, type RngStream } from './engine/rng.ts';
+import {
+  createBrainState,
+  tickBrain,
+  type BrainState,
+  type BrainMultiplierSet,
+  type BrainDecision,
+  getCurrentNodeMetadata,
+} from './engine/brain.ts';
 
 type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
@@ -10,6 +18,10 @@ interface AgentState {
   orbitOffset: number;
   orbitSpeed: number;
   radialBias: number;
+  brain: BrainState;
+  brainMultipliers: BrainMultiplierSet;
+  brainNodeDuration: number;
+  brainDecision: BrainDecision | null;
 }
 
 interface WorldState {
@@ -43,6 +55,17 @@ interface SnapshotAgent {
   x: number;
   y: number;
   lifeStage: LifeStage;
+  brain: SnapshotAgentBrain;
+}
+
+interface SnapshotAgentBrain {
+  brainId: string;
+  nodeId: string;
+  nodeTimer: number;
+  nodeDuration: number;
+  baseFrequency: number;
+  tags: string[];
+  decision: BrainDecision | null;
 }
 
 export interface Snapshot {
@@ -177,6 +200,8 @@ function createWorld(width: number, height: number, stream: RngStream): WorldSta
 function createAgents(count: number, width: number, height: number, stream: RngStream): AgentState[] {
   const agents: AgentState[] = [];
   for (let i = 0; i < count; i += 1) {
+    const brain = createBrainState('AdultMind_v1');
+    const brainMetadata = getCurrentNodeMetadata(brain);
     agents.push({
       id: `agent-${i}`,
       x: stream.nextFloat() * width,
@@ -185,6 +210,10 @@ function createAgents(count: number, width: number, height: number, stream: RngS
       orbitOffset: stream.nextFloat() * Math.PI * 2,
       orbitSpeed: 0.8 + stream.nextFloat() * 0.4,
       radialBias: 0.6 + stream.nextFloat() * 0.3,
+      brain,
+      brainMultipliers: {},
+      brainNodeDuration: brainMetadata.duration,
+      brainDecision: null,
     });
   }
   return agents;
@@ -197,6 +226,12 @@ export function stepSimulationState(simulation: SimulationState): void {
   const centerX = simulation.world.width / 2;
   const centerY = simulation.world.height / 2;
   const globalRotation = (simulation.rng.tick.nextFloat() - 0.5) * 0.2;
+
+  simulation.agents.forEach((agent) => {
+    const brainResult = tickBrain(agent.brain, agent.brainMultipliers);
+    agent.brainNodeDuration = brainResult.nodeDuration;
+    agent.brainDecision = brainResult.decision;
+  });
 
   simulation.agents.forEach((agent, index) => {
     const radius = radiusBase * agent.radialBias;
@@ -218,8 +253,39 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
       x: agent.x,
       y: agent.y,
       lifeStage: agent.lifeStage,
+      brain: createSnapshotBrain(agent),
     })),
     houses: [],
     city: null,
+  };
+}
+
+function createSnapshotBrain(agent: AgentState): SnapshotAgentBrain {
+  const metadata = getCurrentNodeMetadata(agent.brain);
+  const decision = agent.brainDecision
+    ? {
+        fromNodeId: agent.brainDecision.fromNodeId,
+        chosenNodeId: agent.brainDecision.chosenNodeId,
+        candidates: agent.brainDecision.candidates.map((candidate) => ({
+          nodeId: candidate.nodeId,
+          desirability: candidate.desirability,
+          edgeWeight: candidate.edgeWeight,
+          baseFrequency: candidate.baseFrequency,
+          moodMultiplier: candidate.moodMultiplier,
+          personalityMultiplier: candidate.personalityMultiplier,
+          demandMultiplier: candidate.demandMultiplier,
+          tags: [...candidate.tags],
+        })),
+      }
+    : null;
+
+  return {
+    brainId: agent.brain.brainId,
+    nodeId: agent.brain.currentNodeId,
+    nodeTimer: agent.brain.nodeTimer,
+    nodeDuration: agent.brainNodeDuration,
+    baseFrequency: metadata.baseFrequency,
+    tags: [...metadata.tags],
+    decision,
   };
 }
