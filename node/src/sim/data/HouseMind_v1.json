@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "HouseMind_v1",
+  "nodes": [
+    { "id": "FortifyHome", "base_freq": 1.0, "duration": 12, "tags": ["home", "defense", "build"] },
+    { "id": "AvengeSlight", "base_freq": 1.0, "duration": 12, "tags": ["retaliation", "honor", "outward"] },
+    { "id": "NurtureHeir", "base_freq": 1.0, "duration": 12, "tags": ["care", "future", "lineage"] },
+    { "id": "ProtectYoung", "base_freq": 1.0, "duration": 12, "tags": ["care", "defense", "safety"] },
+    { "id": "EnsureLineage", "base_freq": 1.0, "duration": 12, "tags": ["lineage", "strategy", "legacy"] },
+    { "id": "AccumulateStock", "base_freq": 1.0, "duration": 12, "tags": ["resource", "stockpile", "home"] }
+  ],
+  "edges": [
+    ["FortifyHome", "AccumulateStock", 0.6],
+    ["FortifyHome", "ProtectYoung", 0.7],
+    ["AvengeSlight", "FortifyHome", 0.8],
+    ["AvengeSlight", "EnsureLineage", 0.4],
+    ["NurtureHeir", "EnsureLineage", 0.8],
+    ["NurtureHeir", "FortifyHome", 0.5],
+    ["ProtectYoung", "AvengeSlight", 0.7],
+    ["ProtectYoung", "FortifyHome", 0.6],
+    ["EnsureLineage", "NurtureHeir", 0.8],
+    ["EnsureLineage", "AccumulateStock", 0.6],
+    ["AccumulateStock", "FortifyHome", 0.7]
+  ],
+  "start_node": "FortifyHome"
+}

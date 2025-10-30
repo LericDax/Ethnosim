@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "UrbanMind_v1",
+  "nodes": [
+    { "id": "CollectTribute", "base_freq": 1.0, "duration": 72, "tags": ["resource", "authority", "outward"] },
+    { "id": "MaintainOrder", "base_freq": 1.0, "duration": 72, "tags": ["authority", "control", "inward"] },
+    { "id": "ProjectDoctrine", "base_freq": 1.0, "duration": 72, "tags": ["ideology", "ritual", "authority"] },
+    { "id": "AbsorbYouth", "base_freq": 1.0, "duration": 72, "tags": ["youth", "recruit", "social"] },
+    { "id": "SanctifyBirth", "base_freq": 1.0, "duration": 72, "tags": ["ritual", "birth", "loyalty"] },
+    { "id": "SuppressRivals", "base_freq": 1.0, "duration": 72, "tags": ["conflict", "authority", "outward"] }
+  ],
+  "edges": [
+    ["CollectTribute", "MaintainOrder", 0.7],
+    ["CollectTribute", "ProjectDoctrine", 0.6],
+    ["MaintainOrder", "CollectTribute", 0.6],
+    ["MaintainOrder", "SuppressRivals", 0.5],
+    ["ProjectDoctrine", "AbsorbYouth", 0.8],
+    ["ProjectDoctrine", "MaintainOrder", 0.5],
+    ["AbsorbYouth", "ProjectDoctrine", 0.6],
+    ["AbsorbYouth", "MaintainOrder", 0.6],
+    ["SanctifyBirth", "ProjectDoctrine", 0.8],
+    ["SanctifyBirth", "AbsorbYouth", 0.7],
+    ["SuppressRivals", "MaintainOrder", 0.7]
+  ],
+  "start_node": "CollectTribute"
+}
