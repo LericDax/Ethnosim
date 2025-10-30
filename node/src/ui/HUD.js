@@ -34,6 +34,7 @@ export class HUD {
     this._tickInterval = DEFAULT_TICK_INTERVAL;
     this._ticksPerUpdate = 1;
     this._agentOptionIds = new Set();
+    this._detachSceneSelectionListener = null;
 
     this.root = document.createElement('div');
     this.root.className = 'hud-overlay';
@@ -67,6 +68,13 @@ export class HUD {
     this._buildTicksPerUpdateControl();
     this._buildAgentSelect();
     this._buildHeatmapControls();
+
+    if (typeof this.scene.onSelectedAgentChange === 'function') {
+      this._handleSceneSelectionChange = this._handleSceneSelectionChange.bind(this);
+      this._detachSceneSelectionListener = this.scene.onSelectedAgentChange(
+        this._handleSceneSelectionChange,
+      );
+    }
 
     this.container.appendChild(this.root);
   }
@@ -311,6 +319,21 @@ export class HUD {
     if (currentSelection && !ids.has(currentSelection)) {
       this.scene.setSelectedAgent(null);
       this.agentSelect.value = '';
+    }
+  }
+
+  _handleSceneSelectionChange(agentId) {
+    if (!this.agentSelect) {
+      return;
+    }
+
+    if (agentId && !this._agentOptionIds.has(agentId)) {
+      return;
+    }
+
+    const nextValue = agentId ?? '';
+    if (this.agentSelect.value !== nextValue) {
+      this.agentSelect.value = nextValue;
     }
   }
 
