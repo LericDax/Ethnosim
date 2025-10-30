@@ -145,5 +145,6 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     bondPartnerId: null,
     parents,
     temperament,
+    houseId: parent.houseId,
   };
 }

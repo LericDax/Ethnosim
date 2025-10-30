@@ -3,13 +3,19 @@ import {
   createBrainState,
   tickBrain,
   type BrainState,
-  type BrainMultiplierSet,
   type BrainDecision,
   getCurrentNodeMetadata,
 } from './engine/brain.ts';
 import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
 import { createWorld, type WorldState } from './engine/world.ts';
 import { handleReproduction } from './engine/repro.ts';
+import {
+  assignAgentsToHouses,
+  createInitialHouses,
+  updateHouseDemands,
+  type HouseAssignableAgent,
+  type HouseState,
+} from './engine/collectives.ts';
 import {
   stepAging,
   STAGE_BASE_SPEED,
@@ -41,7 +47,7 @@ export interface StageCounts {
   adult: number;
 }
 
-export interface AgentState extends MovableAgent {
+export interface AgentState extends MovableAgent, HouseAssignableAgent {
   ageTicks: number;
   sexBody: 'male' | 'female';
   genderIdentity: 'man' | 'woman' | 'nonbinary';
@@ -50,7 +56,6 @@ export interface AgentState extends MovableAgent {
   bondPartnerId: string | null;
   parents: string[];
   temperament: Temperament;
-  brainMultipliers: BrainMultiplierSet;
   brainNodeDuration: number;
 }
 
@@ -59,12 +64,14 @@ interface SimulationRng {
   world: RngStream;
   agentSpawn: RngStream;
   tick: RngStream;
+  collectives: RngStream;
 }
 
 export interface SimulationState {
   tick: number;
   world: WorldState;
   agents: AgentState[];
+  houses: HouseState[];
   rng: SimulationRng;
   stageCounts: StageCounts;
   nextAgentId: number;
@@ -94,13 +101,31 @@ interface SnapshotAgentBrain {
   decision: BrainDecision | null;
 }
 
+interface SnapshotHouseBrain {
+  brainId: string;
+  nodeId: string;
+  nodeTimer: number;
+  nodeDuration: number;
+  decision: BrainDecision | null;
+}
+
+interface SnapshotHouse {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  members: string[];
+  brain: SnapshotHouseBrain;
+  demand: Record<string, number>;
+}
+
 export interface Snapshot {
   type: 'SNAPSHOT';
   version: number;
   tick: number;
   world: { width: number; height: number };
   agents: SnapshotAgent[];
-  houses: [];
+  houses: SnapshotHouse[];
   city: null;
   stats: StageCounts;
 }
@@ -199,20 +224,29 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   const worldStream = rootRng.stream('world');
   const agentStream = rootRng.stream('agent-spawn');
   const tickStream = rootRng.stream('tick');
+  const collectivesStream = rootRng.stream('collectives');
 
   const world = createWorld(width, height, worldStream);
   const agents = createAgents(config.agentCount, width, height, agentStream);
+  const houses = createInitialHouses({
+    width,
+    height,
+    rng: collectivesStream,
+    agents,
+  });
   const stageCounts = computeStageCounts(agents);
 
   return {
     tick: 0,
     world,
     agents,
+    houses,
     rng: {
       root: rootRng,
       world: worldStream,
       agentSpawn: agentStream,
       tick: tickStream,
+      collectives: collectivesStream,
     },
     stageCounts,
     nextAgentId: agents.length,
@@ -264,6 +298,7 @@ function createAgents(count: number, width: number, height: number, stream: RngS
       bondPartnerId: null,
       parents: [],
       temperament,
+      houseId: null,
     });
   }
 
@@ -357,6 +392,9 @@ export function stepSimulationState(simulation: SimulationState): void {
 
   handleReproduction(simulation);
 
+  assignAgentsToHouses(simulation.houses, simulation.agents);
+  updateHouseDemands(simulation.houses, simulation.agents);
+
   simulation.agents.forEach((agent) => {
     const brainResult = tickBrain(agent.brain, agent.brainMultipliers);
     agent.brainNodeDuration = brainResult.nodeDuration;
@@ -395,7 +433,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
       lifeStage: agent.lifeStage,
       brain: createSnapshotBrain(agent),
     })),
-    houses: [],
+    houses: simulation.houses.map((house) => createSnapshotHouse(house)),
     city: null,
     stats: { ...simulation.stageCounts },
   };
@@ -403,22 +441,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
 
 function createSnapshotBrain(agent: AgentState): SnapshotAgentBrain {
   const metadata = getCurrentNodeMetadata(agent.brain);
-  const decision = agent.brainDecision
-    ? {
-        fromNodeId: agent.brainDecision.fromNodeId,
-        chosenNodeId: agent.brainDecision.chosenNodeId,
-        candidates: agent.brainDecision.candidates.map((candidate) => ({
-          nodeId: candidate.nodeId,
-          desirability: candidate.desirability,
-          edgeWeight: candidate.edgeWeight,
-          baseFrequency: candidate.baseFrequency,
-          moodMultiplier: candidate.moodMultiplier,
-          personalityMultiplier: candidate.personalityMultiplier,
-          demandMultiplier: candidate.demandMultiplier,
-          tags: [...candidate.tags],
-        })),
-      }
-    : null;
+  const decision = cloneDecision(agent.brainDecision);
 
   return {
     brainId: agent.brain.brainId,
@@ -429,4 +452,42 @@ function createSnapshotBrain(agent: AgentState): SnapshotAgentBrain {
     tags: [...metadata.tags],
     decision,
   };
+}
+
+function createSnapshotHouse(house: HouseState): SnapshotHouse {
+  return {
+    id: house.id,
+    x: house.x,
+    y: house.y,
+    radius: house.radius,
+    members: [...house.members],
+    brain: {
+      brainId: house.brain.brainId,
+      nodeId: house.brain.currentNodeId,
+      nodeTimer: house.brain.nodeTimer,
+      nodeDuration: house.brainNodeDuration,
+      decision: cloneDecision(house.brainDecision),
+    },
+    demand: { ...house.activeDemand },
+  };
+}
+
+function cloneDecision(decision: BrainDecision | null): BrainDecision | null {
+  if (!decision) {
+    return null;
+  }
+  return {
+    fromNodeId: decision.fromNodeId,
+    chosenNodeId: decision.chosenNodeId,
+    candidates: decision.candidates.map((candidate) => ({
+      nodeId: candidate.nodeId,
+      desirability: candidate.desirability,
+      edgeWeight: candidate.edgeWeight,
+      baseFrequency: candidate.baseFrequency,
+      moodMultiplier: candidate.moodMultiplier,
+      personalityMultiplier: candidate.personalityMultiplier,
+      demandMultiplier: candidate.demandMultiplier,
+      tags: [...candidate.tags],
+    })),
+  } satisfies BrainDecision;
 }
