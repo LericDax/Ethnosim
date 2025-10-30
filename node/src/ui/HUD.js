@@ -66,6 +66,7 @@ export class HUD {
     this._buildTickIntervalControl();
     this._buildTicksPerUpdateControl();
     this._buildAgentSelect();
+    this._buildHeatmapControls();
 
     this.container.appendChild(this.root);
   }
@@ -207,6 +208,53 @@ export class HUD {
     wrapper.appendChild(label);
     wrapper.appendChild(this.agentSelect);
     this.controlsEl.appendChild(wrapper);
+  }
+
+  _buildHeatmapControls() {
+    const wrapper = document.createElement('div');
+    wrapper.style.display = 'flex';
+    wrapper.style.flexDirection = 'column';
+    wrapper.style.gap = '4px';
+    wrapper.style.marginTop = '4px';
+
+    const label = document.createElement('span');
+    label.textContent = 'Heatmap layers';
+    label.style.fontWeight = '500';
+    wrapper.appendChild(label);
+
+    const influenceToggle = this._createHeatmapToggle('Influence field', 'influence');
+    const densityToggle = this._createHeatmapToggle('Population density', 'density');
+
+    wrapper.appendChild(influenceToggle);
+    wrapper.appendChild(densityToggle);
+
+    this.controlsEl.appendChild(wrapper);
+  }
+
+  _createHeatmapToggle(labelText, layerId) {
+    const row = document.createElement('label');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    row.style.cursor = 'pointer';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = typeof this.scene.isHeatmapLayerEnabled === 'function'
+      ? this.scene.isHeatmapLayerEnabled(layerId)
+      : false;
+    checkbox.addEventListener('change', () => {
+      if (typeof this.scene.setHeatmapLayerEnabled === 'function') {
+        this.scene.setHeatmapLayerEnabled(layerId, checkbox.checked);
+      }
+    });
+
+    const span = document.createElement('span');
+    span.textContent = labelText;
+
+    row.appendChild(checkbox);
+    row.appendChild(span);
+    return row;
   }
 
   _populateAgentSelect(agents) {
