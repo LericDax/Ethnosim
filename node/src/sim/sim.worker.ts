@@ -12,9 +12,11 @@ import { handleReproduction } from './engine/repro.ts';
 import {
   assignAgentsToHouses,
   createInitialHouses,
-  updateHouseDemands,
+  createUrbanCenter,
+  updateCollectiveDemands,
   type HouseAssignableAgent,
   type HouseState,
+  type CityState,
 } from './engine/collectives.ts';
 import {
   stepAging,
@@ -72,6 +74,7 @@ export interface SimulationState {
   world: WorldState;
   agents: AgentState[];
   houses: HouseState[];
+  city: CityState | null;
   rng: SimulationRng;
   stageCounts: StageCounts;
   nextAgentId: number;
@@ -119,6 +122,24 @@ interface SnapshotHouse {
   demand: Record<string, number>;
 }
 
+interface SnapshotCityBrain {
+  brainId: string;
+  nodeId: string;
+  nodeTimer: number;
+  nodeDuration: number;
+  decision: BrainDecision | null;
+}
+
+interface SnapshotCity {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  brain: SnapshotCityBrain;
+  demand: Record<string, number>;
+  demandExpiresAt: number;
+}
+
 export interface Snapshot {
   type: 'SNAPSHOT';
   version: number;
@@ -126,7 +147,7 @@ export interface Snapshot {
   world: { width: number; height: number };
   agents: SnapshotAgent[];
   houses: SnapshotHouse[];
-  city: null;
+  city: SnapshotCity | null;
   stats: StageCounts;
 }
 
@@ -234,6 +255,11 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     rng: collectivesStream,
     agents,
   });
+  const city = createUrbanCenter({
+    width,
+    height,
+    rng: collectivesStream,
+  });
   const stageCounts = computeStageCounts(agents);
 
   return {
@@ -241,6 +267,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     world,
     agents,
     houses,
+    city,
     rng: {
       root: rootRng,
       world: worldStream,
@@ -393,7 +420,7 @@ export function stepSimulationState(simulation: SimulationState): void {
   handleReproduction(simulation);
 
   assignAgentsToHouses(simulation.houses, simulation.agents);
-  updateHouseDemands(simulation.houses, simulation.agents);
+  updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick);
 
   simulation.agents.forEach((agent) => {
     const brainResult = tickBrain(agent.brain, agent.brainMultipliers);
@@ -434,7 +461,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
       brain: createSnapshotBrain(agent),
     })),
     houses: simulation.houses.map((house) => createSnapshotHouse(house)),
-    city: null,
+    city: simulation.city ? createSnapshotCity(simulation.city) : null,
     stats: { ...simulation.stageCounts },
   };
 }
@@ -469,6 +496,24 @@ function createSnapshotHouse(house: HouseState): SnapshotHouse {
       decision: cloneDecision(house.brainDecision),
     },
     demand: { ...house.activeDemand },
+  };
+}
+
+function createSnapshotCity(city: CityState): SnapshotCity {
+  return {
+    id: city.id,
+    x: city.x,
+    y: city.y,
+    radius: city.radius,
+    brain: {
+      brainId: city.brain.brainId,
+      nodeId: city.brain.currentNodeId,
+      nodeTimer: city.brain.nodeTimer,
+      nodeDuration: city.brainNodeDuration,
+      decision: cloneDecision(city.brainDecision),
+    },
+    demand: { ...city.activeDemand },
+    demandExpiresAt: city.demandExpiresAt,
   };
 }
 

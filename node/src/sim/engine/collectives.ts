@@ -1,6 +1,7 @@
 import {
   createBrainState,
   tickBrain,
+  getNodeMetadata,
   type BrainDecision,
   type BrainState,
 } from './brain.ts';
@@ -9,6 +10,10 @@ import type { RngStream } from './rng.ts';
 
 const HOUSE_MIND_ID = 'HouseMind_v1';
 const HOUSE_NODE_DURATION = 12;
+const CITY_MIND_ID = 'UrbanMind_v1';
+const CITY_RADIUS_FACTOR = 0.35;
+
+type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
 interface HouseDemandTemplate {
   nodeId: string;
@@ -74,6 +79,7 @@ export interface HouseAssignableAgent {
   homeY: number;
   houseId: string | null;
   brainMultipliers: BrainMultiplierSet;
+  lifeStage: LifeStage;
 }
 
 export interface HouseState {
@@ -88,6 +94,78 @@ export interface HouseState {
   activeDemand: Record<string, number>;
 }
 
+interface CityDemandTemplate {
+  nodeId: string;
+  tagMultipliers: Record<string, number>;
+}
+
+const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
+  CollectTribute: {
+    nodeId: 'CollectTribute',
+    tagMultipliers: {
+      loyalty: 1.3,
+      duty: 1.2,
+      authority: 1.15,
+      resource: 1.1,
+    },
+  },
+  MaintainOrder: {
+    nodeId: 'MaintainOrder',
+    tagMultipliers: {
+      loyalty: 1.25,
+      authority: 1.2,
+      control: 1.2,
+      discipline: 1.15,
+    },
+  },
+  ProjectDoctrine: {
+    nodeId: 'ProjectDoctrine',
+    tagMultipliers: {
+      ritual: 1.35,
+      ideology: 1.25,
+      loyalty: 1.2,
+    },
+  },
+  AbsorbYouth: {
+    nodeId: 'AbsorbYouth',
+    tagMultipliers: {
+      loyalty: 1.25,
+      recruit: 1.3,
+      youth: 1.2,
+      social: 1.1,
+    },
+  },
+  SanctifyBirth: {
+    nodeId: 'SanctifyBirth',
+    tagMultipliers: {
+      ritual: 1.4,
+      birth: 1.2,
+      loyalty: 1.3,
+      doctrine: 1.15,
+    },
+  },
+  SuppressRivals: {
+    nodeId: 'SuppressRivals',
+    tagMultipliers: {
+      loyalty: 1.2,
+      authority: 1.2,
+      conflict: 1.15,
+    },
+  },
+};
+
+export interface CityState {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  brain: BrainState;
+  brainNodeDuration: number;
+  brainDecision: BrainDecision | null;
+  activeDemand: Record<string, number>;
+  demandExpiresAt: number;
+}
+
 interface HouseSpawnOptions {
   width: number;
   height: number;
@@ -95,6 +173,14 @@ interface HouseSpawnOptions {
   agents: HouseAssignableAgent[];
   desiredHouseCount?: number;
 }
+
+interface CitySpawnOptions {
+  width: number;
+  height: number;
+  rng: RngStream;
+}
+
+const CITY_ELIGIBLE_STAGES: LifeStage[] = ['teen', 'adult'];
 
 export function createInitialHouses(options: HouseSpawnOptions): HouseState[] {
   const { width, height, rng, agents, desiredHouseCount } = options;
@@ -130,6 +216,35 @@ export function createInitialHouses(options: HouseSpawnOptions): HouseState[] {
   return houses;
 }
 
+export function createUrbanCenter(options: CitySpawnOptions): CityState {
+  const { width, height, rng } = options;
+  const centerX = (width - 1) / 2;
+  const centerY = (height - 1) / 2;
+  const jitterRadius = Math.min(width, height) * 0.05;
+  const jitterAngle = rng.nextFloat() * Math.PI * 2;
+  const jitterDistance = jitterRadius * rng.nextFloat();
+  const x = clamp(centerX + Math.cos(jitterAngle) * jitterDistance, 0, width);
+  const y = clamp(centerY + Math.sin(jitterAngle) * jitterDistance, 0, height);
+  const radius = Math.min(width, height) * CITY_RADIUS_FACTOR;
+
+  const brain = createBrainState(CITY_MIND_ID);
+  const metadata = getNodeMetadata(CITY_MIND_ID, brain.currentNodeId);
+  const duration = metadata.duration || 72;
+  const activeDemand = cloneCityDemand(metadata.id);
+
+  return {
+    id: 'city-0',
+    x,
+    y,
+    radius,
+    brain,
+    brainNodeDuration: duration,
+    brainDecision: null,
+    activeDemand,
+    demandExpiresAt: duration,
+  };
+}
+
 export function assignAgentsToHouses(houses: HouseState[], agents: HouseAssignableAgent[]): void {
   if (houses.length === 0) {
     return;
@@ -154,8 +269,13 @@ export function assignAgentsToHouses(houses: HouseState[], agents: HouseAssignab
   }
 }
 
-export function updateHouseDemands(houses: HouseState[], agents: HouseAssignableAgent[]): void {
-  if (houses.length === 0) {
+export function updateCollectiveDemands(
+  houses: HouseState[],
+  city: CityState | null,
+  agents: HouseAssignableAgent[],
+  currentTick: number,
+): void {
+  if (agents.length === 0) {
     return;
   }
 
@@ -167,6 +287,25 @@ export function updateHouseDemands(houses: HouseState[], agents: HouseAssignable
     } else {
       for (const key of Object.keys(agent.brainMultipliers.demand)) {
         delete agent.brainMultipliers.demand[key];
+      }
+    }
+  }
+
+  if (city) {
+    runCityScheduler(city, currentTick);
+    if (city.activeDemand && Object.keys(city.activeDemand).length > 0 && currentTick <= city.demandExpiresAt) {
+      const radiusSq = city.radius * city.radius;
+      for (const agent of agents) {
+        if (!CITY_ELIGIBLE_STAGES.includes(agent.lifeStage)) {
+          continue;
+        }
+        const dx = agent.x - city.x;
+        const dy = agent.y - city.y;
+        if (dx * dx + dy * dy > radiusSq) {
+          continue;
+        }
+        const demand = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
+        applyDemandMultipliers(demand, city.activeDemand);
       }
     }
   }
@@ -187,10 +326,7 @@ export function updateHouseDemands(houses: HouseState[], agents: HouseAssignable
         continue;
       }
       const demand = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
-      for (const [tag, multiplier] of Object.entries(template)) {
-        const current = demand[tag] ?? 1;
-        demand[tag] = current * multiplier;
-      }
+      applyDemandMultipliers(demand, template);
     }
   }
 }
@@ -207,6 +343,27 @@ function runHouseScheduler(house: HouseState): void {
 
   const template = HOUSE_DEMAND_TEMPLATES[house.brain.currentNodeId];
   house.activeDemand = template ? { ...template.tagMultipliers } : {};
+}
+
+function runCityScheduler(city: CityState, currentTick: number): void {
+  if (city.brain.nodeTimer > 1) {
+    city.brain.nodeTimer -= 1;
+  } else {
+    const tickResult = tickBrain(city.brain, {});
+    const duration = tickResult.nodeDuration || 72;
+    city.brainDecision = tickResult.decision;
+    city.brainNodeDuration = duration;
+    city.brain.nodeTimer = duration;
+    city.activeDemand = cloneCityDemand(city.brain.currentNodeId);
+    city.demandExpiresAt = currentTick + duration;
+    return;
+  }
+
+  if (currentTick > city.demandExpiresAt) {
+    const duration = city.brain.nodeTimer || 72;
+    city.activeDemand = cloneCityDemand(city.brain.currentNodeId);
+    city.demandExpiresAt = currentTick + duration;
+  }
 }
 
 function determineHouseCount(agentCount: number, desired?: number): number {
@@ -242,4 +399,22 @@ function clamp(value: number, min: number, max: number): number {
     return max;
   }
   return value;
+}
+
+function cloneCityDemand(nodeId: string): Record<string, number> {
+  const template = CITY_DEMAND_TEMPLATES[nodeId];
+  return template ? { ...template.tagMultipliers } : {};
+}
+
+function applyDemandMultipliers(
+  target: Record<string, number>,
+  multipliers: Record<string, number>,
+): void {
+  for (const [tag, multiplier] of Object.entries(multipliers)) {
+    if (!Number.isFinite(multiplier)) {
+      continue;
+    }
+    const current = target[tag] ?? 1;
+    target[tag] = current * multiplier;
+  }
 }
