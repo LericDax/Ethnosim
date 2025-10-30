@@ -6,6 +6,9 @@ import {
   type BrainDecision,
   type BrainMultiplierSet,
   getCurrentNodeMetadata,
+  serializeBrainState,
+  cloneBrainDecision,
+  type SerializedBrainState,
 } from './engine/brain.ts';
 import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
 import { createWorld, type WorldState } from './engine/world.ts';
@@ -26,6 +29,7 @@ import {
   STAGE_BRAIN_IDS,
   STAGE_LIMITS,
 } from './engine/aging.ts';
+import { resolveScenario, scenarioToSimulationDefaults } from './data/scenarios.ts';
 
 export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
@@ -82,12 +86,31 @@ export interface SimulationState {
   rng: SimulationRng;
   stageCounts: StageCounts;
   nextAgentId: number;
+  scenarioId: string;
+  seed: string;
 }
 
 export interface SimulationConfig {
-  worldSize: [number, number];
-  agentCount: number;
+  worldSize?: [number, number];
+  agentCount?: number;
   seed?: number | string | bigint | null;
+  scenarioId?: string | null;
+}
+
+interface SnapshotBrainSummary {
+  brainId: string;
+  nodeId: string;
+  nodeTimer: number;
+  nodeDuration: number;
+  decision: BrainDecision | null;
+  traitFlags: string[];
+  baseFrequency: number;
+  tags: string[];
+}
+
+interface SnapshotBrainData {
+  summary: SnapshotBrainSummary;
+  state: SerializedBrainState;
 }
 
 interface SnapshotAgent {
@@ -95,25 +118,22 @@ interface SnapshotAgent {
   x: number;
   y: number;
   lifeStage: LifeStage;
-  brain: SnapshotAgentBrain;
-}
-
-interface SnapshotAgentBrain {
-  brainId: string;
-  nodeId: string;
-  nodeTimer: number;
-  nodeDuration: number;
-  baseFrequency: number;
-  tags: string[];
-  decision: BrainDecision | null;
-}
-
-interface SnapshotHouseBrain {
-  brainId: string;
-  nodeId: string;
-  nodeTimer: number;
-  nodeDuration: number;
-  decision: BrainDecision | null;
+  ageStage: LifeStage;
+  brainNode: string;
+  brain: SnapshotBrainData;
+  houseId: string | null;
+  pregnant: boolean;
+  fertility: number;
+  moods: Record<string, number>;
+  brainMultipliers: BrainMultiplierSet;
+  traitFlags: string[];
+  temperament: Temperament;
+  ageTicks: number;
+  speed: number;
+  sexBody: AgentState['sexBody'];
+  genderIdentity: AgentState['genderIdentity'];
+  bondPartnerId: string | null;
+  parents: string[];
 }
 
 interface SnapshotHouse {
@@ -122,16 +142,9 @@ interface SnapshotHouse {
   y: number;
   radius: number;
   members: string[];
-  brain: SnapshotHouseBrain;
+  authority: number;
+  brain: SnapshotBrainData;
   demand: Record<string, number>;
-}
-
-interface SnapshotCityBrain {
-  brainId: string;
-  nodeId: string;
-  nodeTimer: number;
-  nodeDuration: number;
-  decision: BrainDecision | null;
 }
 
 interface SnapshotCity {
@@ -139,19 +152,36 @@ interface SnapshotCity {
   x: number;
   y: number;
   radius: number;
-  brain: SnapshotCityBrain;
+  authority: number;
+  brain: SnapshotBrainData;
   demand: Record<string, number>;
   demandExpiresAt: number;
+}
+
+type DemandScope = 'agent' | 'house' | 'city' | 'terrain';
+
+interface SnapshotDemand {
+  sourceId: string;
+  scope: DemandScope;
+  origin: [number, number];
+  radius: number;
+  targets: string[];
+  multiplier: number;
+  expiresAtTick: number;
 }
 
 export interface Snapshot {
   type: 'SNAPSHOT';
   version: number;
+  scenarioId: string;
+  seed: number;
+  seedHex: string;
   tick: number;
-  world: { width: number; height: number };
+  world: { width: number; height: number; w: number; h: number };
   agents: SnapshotAgent[];
   houses: SnapshotHouse[];
   city: SnapshotCity | null;
+  demands: SnapshotDemand[];
   stats: StageCounts;
 }
 
@@ -160,6 +190,7 @@ interface WorkerInitMessage {
   worldSize?: [number, number];
   agentCount?: number;
   seed?: number | string | bigint | null;
+  scenarioId?: string | null;
   intervalMs?: number;
   ticksPerUpdate?: number;
 }
@@ -255,14 +286,18 @@ if (workerContext) {
 function initializeSimulation(message: WorkerInitMessage): void {
   stopSimulation();
 
-  const worldSize = message.worldSize ?? [100, 100];
-  const agentCount = Math.max(1, message.agentCount ?? 8);
-
-  state = createSimulationState({
-    worldSize: worldSize as [number, number],
-    agentCount,
+  const config: SimulationConfig = {
     seed: message.seed,
-  });
+    scenarioId: message.scenarioId ?? null,
+  };
+  if (message.worldSize) {
+    config.worldSize = message.worldSize;
+  }
+  if (typeof message.agentCount === 'number') {
+    config.agentCount = message.agentCount;
+  }
+
+  state = createSimulationState(config);
 
   postSnapshot();
 
@@ -360,15 +395,24 @@ function sanitizeTicksPerUpdate(value: number | undefined): number {
 }
 
 export function createSimulationState(config: SimulationConfig): SimulationState {
-  const [width, height] = config.worldSize;
+  const { id: scenarioId, config: scenarioConfig } = resolveScenario(config.scenarioId ?? null);
+  const defaults = scenarioToSimulationDefaults(scenarioConfig);
+  const worldSize = config.worldSize ?? defaults.worldSize;
+  const [rawWidth, rawHeight] = worldSize;
+  const width = Math.max(1, Math.floor(rawWidth));
+  const height = Math.max(1, Math.floor(rawHeight));
+  const desiredAgentCount = config.agentCount ?? defaults.agentCount;
+  const agentCount = Math.max(1, Math.floor(desiredAgentCount));
+
   const rootRng = createSeededRng(config.seed);
+  const seedString = rootRng.serialize().seed;
   const worldStream = rootRng.stream('world');
   const agentStream = rootRng.stream('agent-spawn');
   const tickStream = rootRng.stream('tick');
   const collectivesStream = rootRng.stream('collectives');
 
   const world = createWorld(width, height, worldStream);
-  const agents = createAgents(config.agentCount, width, height, agentStream);
+  const agents = createAgents(agentCount, width, height, agentStream);
   const houses = createInitialHouses({
     width,
     height,
@@ -397,6 +441,8 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     },
     stageCounts,
     nextAgentId: agents.length,
+    scenarioId,
+    seed: seedString,
   };
 }
 
@@ -589,37 +635,56 @@ export function stepSimulationState(simulation: SimulationState): void {
   simulation.stageCounts = computeStageCounts(simulation.agents);
 }
 
+const SAFE_NUMBER_MASK = BigInt('0x1fffffffffffff');
+
 export function createSnapshot(simulation: SimulationState): Snapshot {
+  const seedBigInt = safeBigInt(simulation.seed);
+  const limitedSeed = Number(seedBigInt & SAFE_NUMBER_MASK);
+  const seedHex = `0x${seedBigInt.toString(16)}`;
+
   return {
     type: 'SNAPSHOT',
-    version: 1,
+    version: 2,
+    scenarioId: simulation.scenarioId,
+    seed: Number.isFinite(limitedSeed) ? limitedSeed : 0,
+    seedHex,
     tick: simulation.tick,
-    world: { width: simulation.world.width, height: simulation.world.height },
-    agents: simulation.agents.map((agent) => ({
-      id: agent.id,
-      x: agent.x,
-      y: agent.y,
-      lifeStage: agent.lifeStage,
-      brain: createSnapshotBrain(agent),
-    })),
+    world: {
+      width: simulation.world.width,
+      height: simulation.world.height,
+      w: simulation.world.width,
+      h: simulation.world.height,
+    },
+    agents: simulation.agents.map((agent) => createSnapshotAgent(agent)),
     houses: simulation.houses.map((house) => createSnapshotHouse(house)),
     city: simulation.city ? createSnapshotCity(simulation.city) : null,
+    demands: [],
     stats: { ...simulation.stageCounts },
   };
 }
 
-function createSnapshotBrain(agent: AgentState): SnapshotAgentBrain {
-  const metadata = getCurrentNodeMetadata(agent.brain);
-  const decision = cloneDecision(agent.brainDecision);
-
+function createSnapshotAgent(agent: AgentState): SnapshotAgent {
   return {
-    brainId: agent.brain.brainId,
-    nodeId: agent.brain.currentNodeId,
-    nodeTimer: agent.brain.nodeTimer,
-    nodeDuration: agent.brainNodeDuration,
-    baseFrequency: metadata.baseFrequency,
-    tags: [...metadata.tags],
-    decision,
+    id: agent.id,
+    x: agent.x,
+    y: agent.y,
+    lifeStage: agent.lifeStage,
+    ageStage: agent.lifeStage,
+    brainNode: agent.brain.currentNodeId,
+    brain: createBrainSnapshot(agent.brain, agent.brainNodeDuration, agent.brainDecision),
+    houseId: agent.houseId ?? null,
+    pregnant: Boolean(agent.pregnancy),
+    fertility: agent.fertility,
+    moods: { ...agent.moods },
+    brainMultipliers: cloneBrainMultipliers(agent.brainMultipliers),
+    traitFlags: [...agent.traitFlags],
+    temperament: { ...agent.temperament },
+    ageTicks: agent.ageTicks,
+    speed: agent.speed,
+    sexBody: agent.sexBody,
+    genderIdentity: agent.genderIdentity,
+    bondPartnerId: agent.bondPartnerId,
+    parents: [...agent.parents],
   };
 }
 
@@ -630,13 +695,8 @@ function createSnapshotHouse(house: HouseState): SnapshotHouse {
     y: house.y,
     radius: house.radius,
     members: [...house.members],
-    brain: {
-      brainId: house.brain.brainId,
-      nodeId: house.brain.currentNodeId,
-      nodeTimer: house.brain.nodeTimer,
-      nodeDuration: house.brainNodeDuration,
-      decision: cloneDecision(house.brainDecision),
-    },
+    authority: 0,
+    brain: createBrainSnapshot(house.brain, house.brainNodeDuration, house.brainDecision),
     demand: { ...house.activeDemand },
   };
 }
@@ -647,34 +707,52 @@ function createSnapshotCity(city: CityState): SnapshotCity {
     x: city.x,
     y: city.y,
     radius: city.radius,
-    brain: {
-      brainId: city.brain.brainId,
-      nodeId: city.brain.currentNodeId,
-      nodeTimer: city.brain.nodeTimer,
-      nodeDuration: city.brainNodeDuration,
-      decision: cloneDecision(city.brainDecision),
-    },
+    authority: 0,
+    brain: createBrainSnapshot(city.brain, city.brainNodeDuration, city.brainDecision),
     demand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
   };
 }
 
-function cloneDecision(decision: BrainDecision | null): BrainDecision | null {
-  if (!decision) {
-    return null;
-  }
+function createBrainSnapshot(
+  brain: BrainState,
+  nodeDuration: number,
+  decision: BrainDecision | null,
+): SnapshotBrainData {
+  const metadata = getCurrentNodeMetadata(brain);
   return {
-    fromNodeId: decision.fromNodeId,
-    chosenNodeId: decision.chosenNodeId,
-    candidates: decision.candidates.map((candidate) => ({
-      nodeId: candidate.nodeId,
-      desirability: candidate.desirability,
-      edgeWeight: candidate.edgeWeight,
-      baseFrequency: candidate.baseFrequency,
-      moodMultiplier: candidate.moodMultiplier,
-      personalityMultiplier: candidate.personalityMultiplier,
-      demandMultiplier: candidate.demandMultiplier,
-      tags: [...candidate.tags],
-    })),
-  } satisfies BrainDecision;
+    summary: {
+      brainId: brain.brainId,
+      nodeId: brain.currentNodeId,
+      nodeTimer: brain.nodeTimer,
+      nodeDuration,
+      decision: cloneBrainDecision(decision),
+      traitFlags: [...brain.traitFlags],
+      baseFrequency: metadata.baseFrequency,
+      tags: [...metadata.tags],
+    },
+    state: serializeBrainState(brain),
+  };
+}
+
+function cloneBrainMultipliers(multipliers: BrainMultiplierSet): BrainMultiplierSet {
+  const clone: BrainMultiplierSet = {};
+  if (multipliers.mood) {
+    clone.mood = { ...multipliers.mood };
+  }
+  if (multipliers.personality) {
+    clone.personality = { ...multipliers.personality };
+  }
+  if (multipliers.demand) {
+    clone.demand = { ...multipliers.demand };
+  }
+  return clone;
+}
+
+function safeBigInt(value: string): bigint {
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
 }

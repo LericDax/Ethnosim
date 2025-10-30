@@ -10,6 +10,7 @@ import {
   applyPlasticityToWeight,
   createPlasticityState,
   registerPlasticityTransition,
+  type PlasticityEdgeState,
   type PlasticityState,
 } from './plasticity.ts';
 
@@ -86,6 +87,35 @@ export interface BrainState {
   dynamicEdgesFrom: Map<string, BrainEdgeMetadata[]>;
   jumpEdgeCooldowns: JumpEdgeCooldownMap;
   plasticity: PlasticityState;
+}
+
+export interface SerializedActiveJumpEdgeState {
+  id: string;
+  sourceNodeIds: string[];
+  targetNodeId: string;
+  weight: number;
+}
+
+export interface SerializedDynamicEdgeEntry {
+  sourceId: string;
+  targets: Array<{ targetId: string; weight: number }>;
+}
+
+export interface SerializedPlasticityState {
+  tick: number;
+  edges: Record<string, Record<string, PlasticityEdgeState>>;
+}
+
+export interface SerializedBrainState {
+  brainId: string;
+  currentNodeId: string;
+  nodeTimer: number;
+  lastDecision: BrainDecision | null;
+  traitFlags: string[];
+  activeJumpEdges: SerializedActiveJumpEdgeState[];
+  dynamicEdgesFrom: SerializedDynamicEdgeEntry[];
+  jumpEdgeCooldowns: JumpEdgeCooldownMap;
+  plasticity: SerializedPlasticityState;
 }
 
 export interface BrainMultiplierSet {
@@ -205,6 +235,80 @@ export function createBrainState(brainId: string): BrainState {
   };
 }
 
+export function serializeBrainState(state: BrainState): SerializedBrainState {
+  const activeJumpEdges: SerializedActiveJumpEdgeState[] = [];
+  for (const [id, edge] of state.activeJumpEdges.entries()) {
+    activeJumpEdges.push({
+      id,
+      sourceNodeIds: [...edge.sourceNodeIds],
+      targetNodeId: edge.targetNodeId,
+      weight: edge.weight,
+    });
+  }
+
+  const dynamicEdgesFrom: SerializedDynamicEdgeEntry[] = [];
+  for (const [sourceId, edges] of state.dynamicEdgesFrom.entries()) {
+    dynamicEdgesFrom.push({
+      sourceId,
+      targets: edges.map((edge) => ({ targetId: edge.targetId, weight: edge.weight })),
+    });
+  }
+
+  const plasticityEdges: Record<string, Record<string, PlasticityEdgeState>> = {};
+  for (const [sourceId, targetMap] of state.plasticity.edges.entries()) {
+    const serializedTargets: Record<string, PlasticityEdgeState> = {};
+    for (const [targetId, edgeState] of targetMap.entries()) {
+      serializedTargets[targetId] = { ...edgeState };
+    }
+    plasticityEdges[sourceId] = serializedTargets;
+  }
+
+  return {
+    brainId: state.brainId,
+    currentNodeId: state.currentNodeId,
+    nodeTimer: state.nodeTimer,
+    lastDecision: cloneBrainDecision(state.lastDecision),
+    traitFlags: [...state.traitFlags],
+    activeJumpEdges,
+    dynamicEdgesFrom,
+    jumpEdgeCooldowns: { ...state.jumpEdgeCooldowns },
+    plasticity: {
+      tick: state.plasticity.tick,
+      edges: plasticityEdges,
+    },
+  } satisfies SerializedBrainState;
+}
+
+export function restoreBrainState(serialized: SerializedBrainState): BrainState {
+  const base = createBrainState(serialized.brainId);
+  base.currentNodeId = serialized.currentNodeId;
+  base.nodeTimer = serialized.nodeTimer;
+  base.lastDecision = cloneBrainDecision(serialized.lastDecision);
+  base.traitFlags = [...(serialized.traitFlags ?? [])];
+
+  base.activeJumpEdges = new Map();
+  for (const edge of serialized.activeJumpEdges ?? []) {
+    base.activeJumpEdges.set(edge.id, {
+      id: edge.id,
+      sourceNodeIds: [...edge.sourceNodeIds],
+      targetNodeId: edge.targetNodeId,
+      weight: edge.weight,
+    });
+  }
+
+  base.dynamicEdgesFrom = new Map();
+  for (const entry of serialized.dynamicEdgesFrom ?? []) {
+    base.dynamicEdgesFrom.set(
+      entry.sourceId,
+      entry.targets.map((target) => ({ targetId: target.targetId, weight: target.weight })),
+    );
+  }
+
+  base.jumpEdgeCooldowns = { ...(serialized.jumpEdgeCooldowns ?? {}) };
+  base.plasticity = restorePlasticityState(serialized.plasticity);
+  return base;
+}
+
 export function resetNodeTimer(state: BrainState, newNodeId?: string): number {
   const brain = requireBrain(state.brainId);
   if (newNodeId) {
@@ -265,6 +369,26 @@ export function tickBrain(
     nodeDuration: metadata.duration,
     decision: decision ?? state.lastDecision,
   };
+}
+
+export function cloneBrainDecision(decision: BrainDecision | null): BrainDecision | null {
+  if (!decision) {
+    return null;
+  }
+  return {
+    fromNodeId: decision.fromNodeId,
+    chosenNodeId: decision.chosenNodeId,
+    candidates: decision.candidates.map((candidate) => ({
+      nodeId: candidate.nodeId,
+      desirability: candidate.desirability,
+      edgeWeight: candidate.edgeWeight,
+      baseFrequency: candidate.baseFrequency,
+      moodMultiplier: candidate.moodMultiplier,
+      personalityMultiplier: candidate.personalityMultiplier,
+      demandMultiplier: candidate.demandMultiplier,
+      tags: [...candidate.tags],
+    })),
+  } satisfies BrainDecision;
 }
 
 function evaluateCandidates(
@@ -438,4 +562,29 @@ function rebuildDynamicEdgeMap(
     }
   }
   return map;
+}
+
+function restorePlasticityState(serialized: SerializedPlasticityState | undefined): PlasticityState {
+  const state = createPlasticityState();
+  if (!serialized) {
+    return state;
+  }
+
+  state.tick = typeof serialized.tick === 'number' ? serialized.tick : 0;
+  state.edges = new Map();
+
+  const edges = serialized.edges ?? {};
+  for (const [sourceId, targets] of Object.entries(edges)) {
+    const targetMap = new Map<string, PlasticityEdgeState>();
+    if (targets) {
+      for (const [targetId, edgeState] of Object.entries(targets)) {
+        if (edgeState) {
+          targetMap.set(targetId, { ...edgeState });
+        }
+      }
+    }
+    state.edges.set(sourceId, targetMap);
+  }
+
+  return state;
 }

@@ -1,11 +1,25 @@
+export interface SerializedRngStream {
+  state: string;
+  increment: string;
+}
+
+export interface SerializedSeededRng {
+  seed: string;
+  streams: Record<string, SerializedRngStream>;
+  children: Record<string, SerializedSeededRng>;
+}
+
 export interface RngStream {
   nextUint32(): number;
   nextFloat(): number;
+  serialize(): SerializedRngStream;
+  restore(serialized: SerializedRngStream): void;
 }
 
 export interface SeededRng {
   stream(label: string): RngStream;
   spawn(label: string): SeededRng;
+  serialize(): SerializedSeededRng;
 }
 
 const MOD_MASK = (1n << 64n) - 1n;
@@ -14,7 +28,7 @@ const MULTIPLIER = 6364136223846793005n;
 
 class Pcg32 implements RngStream {
   private state: bigint;
-  private readonly increment: bigint;
+  private increment: bigint;
 
   constructor(seed: bigint, sequence: bigint) {
     this.state = ((seed & MOD_MASK) + DEFAULT_SEED) & MOD_MASK;
@@ -31,6 +45,22 @@ class Pcg32 implements RngStream {
 
   nextFloat(): number {
     return this.nextUint32() / 0x100000000;
+  }
+
+  serialize(): SerializedRngStream {
+    return {
+      state: this.state.toString(),
+      increment: this.increment.toString(),
+    };
+  }
+
+  restore(serialized: SerializedRngStream): void {
+    if (serialized?.state) {
+      this.state = BigInt(serialized.state) & MOD_MASK;
+    }
+    if (serialized?.increment) {
+      this.increment = BigInt(serialized.increment) & MOD_MASK;
+    }
   }
 }
 
@@ -67,10 +97,12 @@ function mix64(value: bigint): bigint {
   return z & MOD_MASK;
 }
 
-function createSeededRngFromBigInt(seed: bigint): SeededRng {
+function createSeededRngInternal(seed: bigint, snapshot: SerializedSeededRng | null): SeededRng {
   const normalizedSeed = seed & MOD_MASK;
   const streamCache = new Map<string, Pcg32>();
   const childCache = new Map<string, SeededRng>();
+  const streamSnapshots = snapshot?.streams ?? {};
+  const childSnapshots = snapshot?.children ?? {};
 
   function deriveSequence(labelHash: bigint): bigint {
     return mix64(normalizedSeed + labelHash + 0x9e3779b97f4a7c15n);
@@ -89,6 +121,10 @@ function createSeededRngFromBigInt(seed: bigint): SeededRng {
       if (!streamCache.has(label)) {
         const labelHash = fnv1a64(label);
         const stream = new Pcg32(deriveSeed(labelHash), deriveSequence(labelHash));
+        const snapshotState = streamSnapshots[label];
+        if (snapshotState) {
+          stream.restore(snapshotState);
+        }
         streamCache.set(label, stream);
       }
       return streamCache.get(label)!;
@@ -96,14 +132,37 @@ function createSeededRngFromBigInt(seed: bigint): SeededRng {
     spawn(label: string): SeededRng {
       if (!childCache.has(label)) {
         const labelHash = fnv1a64(label);
-        childCache.set(label, createSeededRngFromBigInt(deriveChild(labelHash)));
+        const childSnapshot = childSnapshots[label] ?? null;
+        childCache.set(label, createSeededRngInternal(deriveChild(labelHash), childSnapshot));
       }
       return childCache.get(label)!;
+    },
+    serialize(): SerializedSeededRng {
+      const streams: Record<string, SerializedRngStream> = {};
+      for (const [label, stream] of streamCache.entries()) {
+        streams[label] = stream.serialize();
+      }
+
+      const children: Record<string, SerializedSeededRng> = {};
+      for (const [label, child] of childCache.entries()) {
+        children[label] = child.serialize();
+      }
+
+      return {
+        seed: normalizedSeed.toString(),
+        streams,
+        children,
+      };
     },
   };
 }
 
 export function createSeededRng(seed?: number | string | bigint | null): SeededRng {
   const normalized = normalizeSeed(seed);
-  return createSeededRngFromBigInt(normalized);
+  return createSeededRngInternal(normalized, null);
+}
+
+export function restoreSeededRng(serialized: SerializedSeededRng): SeededRng {
+  const seed = serialized?.seed ? BigInt(serialized.seed) & MOD_MASK : DEFAULT_SEED;
+  return createSeededRngInternal(seed, serialized ?? null);
 }
