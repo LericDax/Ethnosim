@@ -23,9 +23,23 @@ const LIFE_STAGE_COLORS = {
   adult: 0x22c55e,
 };
 const DEFAULT_AGENT_COLOR = 0xffffff;
+const SELECTED_VARIANT = 'selected';
+const DEFAULT_VARIANT = 'default';
+const DEFAULT_AGENT_SCALE = 1;
+const SELECTED_AGENT_SCALE = 1.6;
 
-function materialForLifeStage(stage) {
-  const hex = LIFE_STAGE_COLORS[stage] ?? DEFAULT_AGENT_COLOR;
+function lightenHexColor(hex, factor = 0.35) {
+  const base = new Color(hex);
+  const target = new Color(0xffffff);
+  base.lerp(target, factor);
+  return base.getHex();
+}
+
+function materialForLifeStage(stage, variant = DEFAULT_VARIANT) {
+  let hex = LIFE_STAGE_COLORS[stage] ?? DEFAULT_AGENT_COLOR;
+  if (variant === SELECTED_VARIANT) {
+    hex = lightenHexColor(hex);
+  }
   return new MeshBasicMaterial({ color: hex });
 }
 
@@ -114,11 +128,12 @@ export class MapScene {
     this.renderer.render(this.scene, this.camera);
   }
 
-  _materialForStage(stage) {
-    if (!this._agentMaterials.has(stage)) {
-      this._agentMaterials.set(stage, materialForLifeStage(stage));
+  _materialForStage(stage, variant = DEFAULT_VARIANT) {
+    const key = `${stage}:${variant}`;
+    if (!this._agentMaterials.has(key)) {
+      this._agentMaterials.set(key, materialForLifeStage(stage, variant));
     }
-    return this._agentMaterials.get(stage);
+    return this._agentMaterials.get(key);
   }
 
   _getOrCreateAgentMesh(agent) {
@@ -126,6 +141,7 @@ export class MapScene {
     if (!mesh) {
       mesh = new Mesh(AGENT_GEOMETRY, this._materialForStage(agent.lifeStage));
       mesh.position.set(agent.x ?? 0, agent.y ?? 0, 1);
+      mesh.scale.setScalar(DEFAULT_AGENT_SCALE);
       this.agentMeshes.set(agent.id, mesh);
       this.agentLayer.add(mesh);
     }
@@ -152,8 +168,11 @@ export class MapScene {
     for (const agent of snapshot.agents ?? []) {
       if (!agent?.id) continue;
       const mesh = this._getOrCreateAgentMesh(agent);
-      mesh.material = this._materialForStage(agent.lifeStage);
+      mesh.userData.lifeStage = agent.lifeStage;
+      const isSelected = this.selectedAgentId === agent.id;
+      mesh.material = this._materialForStage(agent.lifeStage, isSelected ? SELECTED_VARIANT : DEFAULT_VARIANT);
       mesh.position.set(agent.x ?? 0, agent.y ?? 0, mesh.position.z);
+      mesh.scale.setScalar(isSelected ? SELECTED_AGENT_SCALE : DEFAULT_AGENT_SCALE);
       seen.add(agent.id);
     }
 
@@ -167,11 +186,14 @@ export class MapScene {
     if (this.trailsOverlay) {
       this.trailsOverlay.updateFromSnapshot(snapshot);
     }
+
+    this._applySelectionHighlight();
   }
 
   setSelectedAgent(agentId) {
     this.selectedAgentId = agentId ?? null;
     this._syncTrailOverlayState();
+    this._applySelectionHighlight();
   }
 
   setTrailsEnabled(enabled) {
@@ -188,5 +210,16 @@ export class MapScene {
     const trackedId = this.selectedAgentId ?? null;
     this.trailsOverlay.setTrackedAgent(trackedId);
     this.trailsOverlay.setEnabled(this.trailsEnabled && trackedId != null);
+  }
+
+  _applySelectionHighlight() {
+    for (const [id, mesh] of this.agentMeshes) {
+      const lifeStage = mesh.userData.lifeStage;
+      const isSelected = this.selectedAgentId === id;
+      if (lifeStage) {
+        mesh.material = this._materialForStage(lifeStage, isSelected ? SELECTED_VARIANT : DEFAULT_VARIANT);
+      }
+      mesh.scale.setScalar(isSelected ? SELECTED_AGENT_SCALE : DEFAULT_AGENT_SCALE);
+    }
   }
 }

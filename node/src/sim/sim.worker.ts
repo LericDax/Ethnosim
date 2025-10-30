@@ -161,13 +161,43 @@ interface WorkerInitMessage {
   agentCount?: number;
   seed?: number | string | bigint | null;
   intervalMs?: number;
+  ticksPerUpdate?: number;
 }
 
 interface WorkerStopMessage {
   type: 'STOP';
 }
 
-type WorkerMessage = WorkerInitMessage | WorkerStopMessage;
+interface WorkerPauseMessage {
+  type: 'PAUSE';
+}
+
+interface WorkerResumeMessage {
+  type: 'RESUME';
+}
+
+interface WorkerSetTickIntervalMessage {
+  type: 'SET_TICK_INTERVAL';
+  intervalMs: number;
+}
+
+interface WorkerSetTicksPerUpdateMessage {
+  type: 'SET_TICKS_PER_UPDATE';
+  ticksPerUpdate: number;
+}
+
+interface WorkerRequestSnapshotMessage {
+  type: 'REQUEST_SNAPSHOT';
+}
+
+type WorkerMessage =
+  | WorkerInitMessage
+  | WorkerStopMessage
+  | WorkerPauseMessage
+  | WorkerResumeMessage
+  | WorkerSetTickIntervalMessage
+  | WorkerSetTicksPerUpdateMessage
+  | WorkerRequestSnapshotMessage;
 
 interface WorkerContext {
   postMessage: (data: unknown) => void;
@@ -183,6 +213,9 @@ const workerContext: WorkerContext | null =
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 let state: SimulationState | null = null;
+let isPaused = false;
+let tickIntervalMs = 500;
+let ticksPerUpdate = 1;
 
 if (workerContext) {
   workerContext.addEventListener('message', (event) => {
@@ -197,6 +230,21 @@ if (workerContext) {
         break;
       case 'STOP':
         stopSimulation();
+        break;
+      case 'PAUSE':
+        pauseSimulation();
+        break;
+      case 'RESUME':
+        resumeSimulation();
+        break;
+      case 'SET_TICK_INTERVAL':
+        updateTickInterval(message.intervalMs);
+        break;
+      case 'SET_TICKS_PER_UPDATE':
+        updateTicksPerUpdate(message.ticksPerUpdate);
+        break;
+      case 'REQUEST_SNAPSHOT':
+        postSnapshot();
         break;
       default:
         break;
@@ -218,14 +266,10 @@ function initializeSimulation(message: WorkerInitMessage): void {
 
   postSnapshot();
 
-  const intervalMs = message.intervalMs ?? 500;
-  intervalHandle = setInterval(() => {
-    if (!state) {
-      return;
-    }
-    stepSimulationState(state);
-    postSnapshot();
-  }, intervalMs);
+  tickIntervalMs = sanitizeTickInterval(message.intervalMs);
+  ticksPerUpdate = sanitizeTicksPerUpdate(message.ticksPerUpdate);
+  isPaused = false;
+  scheduleTickLoop();
 }
 
 function stopSimulation(): void {
@@ -234,6 +278,7 @@ function stopSimulation(): void {
     intervalHandle = null;
   }
   state = null;
+  isPaused = false;
 }
 
 function postSnapshot(): void {
@@ -241,6 +286,77 @@ function postSnapshot(): void {
     return;
   }
   workerContext.postMessage(createSnapshot(state));
+}
+
+function scheduleTickLoop(): void {
+  if (intervalHandle) {
+    clearInterval(intervalHandle);
+    intervalHandle = null;
+  }
+
+  if (isPaused || !state) {
+    return;
+  }
+
+  intervalHandle = setInterval(runSimulationStep, tickIntervalMs);
+}
+
+function runSimulationStep(): void {
+  if (!state || isPaused) {
+    return;
+  }
+
+  for (let i = 0; i < ticksPerUpdate; i += 1) {
+    stepSimulationState(state);
+  }
+  postSnapshot();
+}
+
+function pauseSimulation(): void {
+  if (isPaused) {
+    return;
+  }
+  isPaused = true;
+  if (intervalHandle) {
+    clearInterval(intervalHandle);
+    intervalHandle = null;
+  }
+}
+
+function resumeSimulation(): void {
+  if (!state) {
+    return;
+  }
+  if (!isPaused) {
+    return;
+  }
+  isPaused = false;
+  scheduleTickLoop();
+}
+
+function updateTickInterval(interval: number): void {
+  tickIntervalMs = sanitizeTickInterval(interval);
+  scheduleTickLoop();
+}
+
+function updateTicksPerUpdate(value: number): void {
+  ticksPerUpdate = sanitizeTicksPerUpdate(value);
+}
+
+function sanitizeTickInterval(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return tickIntervalMs;
+  }
+  const clamped = Math.max(16, Math.min(10000, Math.floor(value)));
+  return clamped;
+}
+
+function sanitizeTicksPerUpdate(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return ticksPerUpdate;
+  }
+  const clamped = Math.max(1, Math.min(200, Math.floor(value)));
+  return clamped;
 }
 
 export function createSimulationState(config: SimulationConfig): SimulationState {
