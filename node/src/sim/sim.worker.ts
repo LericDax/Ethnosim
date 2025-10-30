@@ -7,27 +7,14 @@ import {
   type BrainDecision,
   getCurrentNodeMetadata,
 } from './engine/brain.ts';
+import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
+import { createWorld, type WorldState } from './engine/world.ts';
 
-type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
+type LifeStage = MovableAgent['lifeStage'];
 
-interface AgentState {
-  id: string;
-  x: number;
-  y: number;
-  lifeStage: LifeStage;
-  orbitOffset: number;
-  orbitSpeed: number;
-  radialBias: number;
-  brain: BrainState;
+interface AgentState extends MovableAgent {
   brainMultipliers: BrainMultiplierSet;
   brainNodeDuration: number;
-  brainDecision: BrainDecision | null;
-}
-
-interface WorldState {
-  width: number;
-  height: number;
-  climateSeed: number;
 }
 
 interface SimulationRng {
@@ -189,43 +176,49 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   };
 }
 
-function createWorld(width: number, height: number, stream: RngStream): WorldState {
-  return {
-    width,
-    height,
-    climateSeed: stream.nextFloat(),
-  };
-}
-
 function createAgents(count: number, width: number, height: number, stream: RngStream): AgentState[] {
   const agents: AgentState[] = [];
+  const centerX = (width - 1) / 2;
+  const centerY = (height - 1) / 2;
+  const homeRadius = Math.min(width, height) * 0.1;
   for (let i = 0; i < count; i += 1) {
     const brain = createBrainState('AdultMind_v1');
     const brainMetadata = getCurrentNodeMetadata(brain);
+    const lifeStage = LIFE_STAGES[i % LIFE_STAGES.length];
     agents.push({
       id: `agent-${i}`,
       x: stream.nextFloat() * width,
       y: stream.nextFloat() * height,
-      lifeStage: LIFE_STAGES[i % LIFE_STAGES.length],
-      orbitOffset: stream.nextFloat() * Math.PI * 2,
-      orbitSpeed: 0.8 + stream.nextFloat() * 0.4,
-      radialBias: 0.6 + stream.nextFloat() * 0.3,
+      lifeStage,
+      speed: 0.4 + stream.nextFloat() * 0.6,
+      homeX: centerX + (stream.nextFloat() - 0.5) * homeRadius,
+      homeY: centerY + (stream.nextFloat() - 0.5) * homeRadius,
+      caregiverId: null,
+      explorationBias: stream.nextFloat(),
       brain,
       brainMultipliers: {},
       brainNodeDuration: brainMetadata.duration,
       brainDecision: null,
     });
   }
+
+  const adults = agents.filter((agent) => agent.lifeStage === 'adult');
+  agents.forEach((agent) => {
+    if (agent.lifeStage === 'baby' || agent.lifeStage === 'child') {
+      if (adults.length > 0) {
+        const caregiver = adults[Math.floor(stream.nextFloat() * adults.length)];
+        agent.caregiverId = caregiver.id;
+      }
+      if (agent.lifeStage === 'baby') {
+        agent.speed = 0;
+      }
+    }
+  });
   return agents;
 }
 
 export function stepSimulationState(simulation: SimulationState): void {
   simulation.tick += 1;
-  const t = simulation.tick;
-  const radiusBase = Math.min(simulation.world.width, simulation.world.height) * 0.45;
-  const centerX = simulation.world.width / 2;
-  const centerY = simulation.world.height / 2;
-  const globalRotation = (simulation.rng.tick.nextFloat() - 0.5) * 0.2;
 
   simulation.agents.forEach((agent) => {
     const brainResult = tickBrain(agent.brain, agent.brainMultipliers);
@@ -233,12 +226,18 @@ export function stepSimulationState(simulation: SimulationState): void {
     agent.brainDecision = brainResult.decision;
   });
 
-  simulation.agents.forEach((agent, index) => {
-    const radius = radiusBase * agent.radialBias;
-    const baseAngle = (t / 40 + index / simulation.agents.length) * Math.PI * 2;
-    const angle = baseAngle * agent.orbitSpeed + agent.orbitOffset + globalRotation;
-    agent.x = centerX + Math.cos(angle) * radius;
-    agent.y = centerY + Math.sin(angle) * radius;
+  const agentsById = new Map<string, AgentState>();
+  simulation.agents.forEach((agent) => {
+    agentsById.set(agent.id, agent);
+  });
+
+  const movementContext: MovementContext = {
+    world: simulation.world,
+    agentsById,
+  };
+
+  simulation.agents.forEach((agent) => {
+    moveAgent(agent, movementContext, simulation.rng.tick);
   });
 }
 
