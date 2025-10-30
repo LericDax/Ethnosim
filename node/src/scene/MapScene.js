@@ -12,6 +12,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import { TrailsOverlay } from './overlays/Trails.ts';
 
 const DEFAULT_WORLD_SIZE = 100;
 const AGENT_GEOMETRY = new CircleGeometry(0.4, 24);
@@ -55,12 +56,18 @@ export class MapScene {
     this._agentMaterials = new Map();
     this.agentMeshes = new Map();
     this.agentLayer = new Group();
+    this.trailsOverlay = new TrailsOverlay();
+    this.trailsEnabled = false;
+    this.selectedAgentId = null;
 
     this._buildTerrain();
     this._setupLights();
 
+    this.root.add(this.trailsOverlay);
     this.root.add(this.agentLayer);
     this.latestSnapshot = null;
+
+    this._syncTrailOverlayState();
   }
 
   _setupLights() {
@@ -156,5 +163,30 @@ export class MapScene {
         this.agentMeshes.delete(id);
       }
     }
+
+    if (this.trailsOverlay) {
+      this.trailsOverlay.updateFromSnapshot(snapshot);
+    }
+  }
+
+  setSelectedAgent(agentId) {
+    this.selectedAgentId = agentId ?? null;
+    this._syncTrailOverlayState();
+  }
+
+  setTrailsEnabled(enabled) {
+    this.trailsEnabled = Boolean(enabled);
+    this._syncTrailOverlayState();
+  }
+
+  toggleTrailsForSelectedAgent() {
+    this.setTrailsEnabled(!this.trailsEnabled);
+  }
+
+  _syncTrailOverlayState() {
+    if (!this.trailsOverlay) return;
+    const trackedId = this.selectedAgentId ?? null;
+    this.trailsOverlay.setTrackedAgent(trackedId);
+    this.trailsOverlay.setEnabled(this.trailsEnabled && trackedId != null);
   }
 }
