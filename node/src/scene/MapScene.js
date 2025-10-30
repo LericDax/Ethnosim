@@ -13,6 +13,7 @@ import {
   WebGLRenderer,
 } from 'three';
 import { TrailsOverlay } from './overlays/Trails.ts';
+import { HeatmapOverlay } from './overlays/Heatmap.ts';
 
 const DEFAULT_WORLD_SIZE = 100;
 const AGENT_GEOMETRY = new CircleGeometry(0.4, 24);
@@ -70,13 +71,20 @@ export class MapScene {
     this._agentMaterials = new Map();
     this.agentMeshes = new Map();
     this.agentLayer = new Group();
+    this.heatmapOverlay = new HeatmapOverlay({
+      width: this.worldWidth,
+      height: this.worldHeight,
+      elevation: 0.1,
+    });
     this.trailsOverlay = new TrailsOverlay();
     this.trailsEnabled = false;
     this.selectedAgentId = null;
+    this.heatmapStats = null;
 
     this._buildTerrain();
     this._setupLights();
 
+    this.root.add(this.heatmapOverlay);
     this.root.add(this.trailsOverlay);
     this.root.add(this.agentLayer);
     this.latestSnapshot = null;
@@ -159,6 +167,9 @@ export class MapScene {
         this.worldWidth = width;
         this.worldHeight = height;
         this._updateCamera();
+        if (this.heatmapOverlay) {
+          this.heatmapOverlay.setWorldSize(this.worldWidth, this.worldHeight);
+        }
       }
     }
 
@@ -187,6 +198,7 @@ export class MapScene {
       this.trailsOverlay.updateFromSnapshot(snapshot);
     }
 
+    this._updateHeatmapStats(snapshot);
     this._applySelectionHighlight();
   }
 
@@ -205,11 +217,69 @@ export class MapScene {
     this.setTrailsEnabled(!this.trailsEnabled);
   }
 
+  setHeatmapLayerEnabled(layer, enabled) {
+    if (!this.heatmapOverlay) return;
+    this.heatmapOverlay.setLayerEnabled(layer, enabled);
+  }
+
+  isHeatmapLayerEnabled(layer) {
+    if (!this.heatmapOverlay) return false;
+    return this.heatmapOverlay.isLayerEnabled(layer);
+  }
+
+  setHeatmapAggregates(stats) {
+    this.heatmapStats = stats ?? null;
+    if (this.heatmapOverlay) {
+      this.heatmapOverlay.updateAggregatedStats(stats ?? {});
+    }
+  }
+
   _syncTrailOverlayState() {
     if (!this.trailsOverlay) return;
     const trackedId = this.selectedAgentId ?? null;
     this.trailsOverlay.setTrackedAgent(trackedId);
     this.trailsOverlay.setEnabled(this.trailsEnabled && trackedId != null);
+  }
+
+  _updateHeatmapStats(snapshot) {
+    if (!this.heatmapOverlay || !snapshot) {
+      return;
+    }
+
+    const counts = snapshot.stats ?? {};
+    const baby = counts.baby ?? 0;
+    const child = counts.child ?? 0;
+    const teen = counts.teen ?? 0;
+    const adult = counts.adult ?? 0;
+    const total = baby + child + teen + adult;
+
+    const totalSafe = total > 0 ? total : 1;
+    const area = Math.max(1, this.worldWidth * this.worldHeight);
+
+    const authority = total > 0 ? adult / totalSafe : 0;
+    const trust = total > 0 ? child / totalSafe : 0;
+    const fear = total > 0 ? teen / totalSafe : 0;
+    const loyalty = total > 0 ? Math.min(1, adult / totalSafe + teen / (totalSafe * 2)) : 0;
+    const resentment = total > 0 ? Math.min(1, (teen / totalSafe) * 0.6 + (baby / totalSafe) * 0.2) : 0;
+
+    const rawDensity = total / area;
+    const normalizedDensity = Math.min(1, rawDensity * 10);
+
+    const aggregates = {
+      authority,
+      moodIntensities: {
+        trust,
+        fear,
+        loyalty,
+        resentment,
+      },
+      density: {
+        normalized: normalizedDensity,
+        total,
+      },
+    };
+
+    this.setHeatmapAggregates(aggregates);
   }
 
   _applySelectionHighlight() {
