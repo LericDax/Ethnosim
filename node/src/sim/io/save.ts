@@ -1,0 +1,270 @@
+import { createSnapshot, type SimulationState } from '../sim.worker.ts';
+import { cloneBrainDecision, serializeBrainState, type SerializedBrainState } from '../engine/brain.ts';
+import type { BrainDecision } from '../engine/brain.ts';
+import type { SerializedSeededRng, SerializedRngStream } from '../engine/rng.ts';
+import type { WorldState } from '../engine/world.ts';
+import type { AgentState, PregnancyState } from '../sim.worker.ts';
+import type { CityState, HouseState } from '../engine/collectives.ts';
+
+export const DB_NAME = 'ethnosim-snapshots';
+export const STORE_NAME = 'snapshots';
+export const DB_VERSION = 1;
+
+export interface SerializedAgentState {
+  id: string;
+  x: number;
+  y: number;
+  lifeStage: AgentState['lifeStage'];
+  ageTicks: number;
+  speed: number;
+  homeX: number;
+  homeY: number;
+  caregiverId: string | null;
+  explorationBias: number;
+  brain: SerializedBrainState;
+  brainMultipliers: AgentState['brainMultipliers'];
+  brainNodeDuration: number;
+  brainDecision: BrainDecision | null;
+  sexBody: AgentState['sexBody'];
+  genderIdentity: AgentState['genderIdentity'];
+  fertility: number;
+  pregnancy: PregnancyState | null;
+  bondPartnerId: string | null;
+  parents: string[];
+  temperament: AgentState['temperament'];
+  traitFlags: string[];
+  moods: Record<string, number>;
+  houseId: string | null;
+}
+
+export interface SerializedHouseState {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  brain: SerializedBrainState;
+  brainNodeDuration: number;
+  brainDecision: BrainDecision | null;
+  members: string[];
+  activeDemand: Record<string, number>;
+}
+
+export interface SerializedCityState {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  brain: SerializedBrainState;
+  brainNodeDuration: number;
+  brainDecision: BrainDecision | null;
+  activeDemand: Record<string, number>;
+  demandExpiresAt: number;
+}
+
+export interface SerializedTerrainLayer {
+  width: number;
+  height: number;
+  tiles: WorldState['terrain']['tiles'];
+}
+
+export interface SerializedWorldState {
+  width: number;
+  height: number;
+  centerX: number;
+  centerY: number;
+  climateSeed: number;
+  terrain: SerializedTerrainLayer;
+}
+
+export interface SerializedSimulationRng {
+  root: SerializedSeededRng;
+  streams: {
+    world: SerializedRngStream;
+    agentSpawn: SerializedRngStream;
+    tick: SerializedRngStream;
+    collectives: SerializedRngStream;
+  };
+}
+
+export interface SerializedSimulationState {
+  version: number;
+  tick: number;
+  scenarioId: string;
+  seed: string;
+  world: SerializedWorldState;
+  agents: SerializedAgentState[];
+  houses: SerializedHouseState[];
+  city: SerializedCityState | null;
+  rng: SerializedSimulationRng;
+  stageCounts: SimulationState['stageCounts'];
+  nextAgentId: number;
+}
+
+export interface PersistedSnapshotRecord {
+  id: string;
+  savedAt: number;
+  tick: number;
+  scenarioId: string;
+  snapshot: ReturnType<typeof createSnapshot>;
+  state: SerializedSimulationState;
+}
+
+export function serializeSimulationState(state: SimulationState): SerializedSimulationState {
+  return {
+    version: 1,
+    tick: state.tick,
+    scenarioId: state.scenarioId,
+    seed: state.seed,
+    world: serializeWorld(state.world),
+    agents: state.agents.map(serializeAgent),
+    houses: state.houses.map(serializeHouse),
+    city: state.city ? serializeCity(state.city) : null,
+    rng: serializeRng(state),
+    stageCounts: { ...state.stageCounts },
+    nextAgentId: state.nextAgentId,
+  };
+}
+
+export async function saveSimulationState(id: string, state: SimulationState): Promise<void> {
+  const db = await openDatabase();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  const record: PersistedSnapshotRecord = {
+    id,
+    savedAt: Date.now(),
+    tick: state.tick,
+    scenarioId: state.scenarioId,
+    snapshot: createSnapshot(state),
+    state: serializeSimulationState(state),
+  };
+  await requestAsPromise(store.put(record));
+  await transactionComplete(tx);
+  db.close();
+}
+
+function serializeWorld(world: WorldState): SerializedWorldState {
+  return {
+    width: world.width,
+    height: world.height,
+    centerX: world.centerX,
+    centerY: world.centerY,
+    climateSeed: world.climateSeed,
+    terrain: {
+      width: world.terrain.width,
+      height: world.terrain.height,
+      tiles: [...world.terrain.tiles],
+    },
+  };
+}
+
+function serializeAgent(agent: AgentState): SerializedAgentState {
+  return {
+    id: agent.id,
+    x: agent.x,
+    y: agent.y,
+    lifeStage: agent.lifeStage,
+    ageTicks: agent.ageTicks,
+    speed: agent.speed,
+    homeX: agent.homeX,
+    homeY: agent.homeY,
+    caregiverId: agent.caregiverId,
+    explorationBias: agent.explorationBias,
+    brain: serializeBrainState(agent.brain),
+    brainMultipliers: cloneBrainMultipliers(agent.brainMultipliers),
+    brainNodeDuration: agent.brainNodeDuration,
+    brainDecision: cloneBrainDecision(agent.brainDecision),
+    sexBody: agent.sexBody,
+    genderIdentity: agent.genderIdentity,
+    fertility: agent.fertility,
+    pregnancy: agent.pregnancy ? { ...agent.pregnancy, fetusTemperament: { ...agent.pregnancy.fetusTemperament } } : null,
+    bondPartnerId: agent.bondPartnerId,
+    parents: [...agent.parents],
+    temperament: { ...agent.temperament },
+    traitFlags: [...agent.traitFlags],
+    moods: { ...agent.moods },
+    houseId: agent.houseId ?? null,
+  };
+}
+
+function serializeHouse(house: HouseState): SerializedHouseState {
+  return {
+    id: house.id,
+    x: house.x,
+    y: house.y,
+    radius: house.radius,
+    brain: serializeBrainState(house.brain),
+    brainNodeDuration: house.brainNodeDuration,
+    brainDecision: cloneBrainDecision(house.brainDecision),
+    members: [...house.members],
+    activeDemand: { ...house.activeDemand },
+  };
+}
+
+function serializeCity(city: CityState): SerializedCityState {
+  return {
+    id: city.id,
+    x: city.x,
+    y: city.y,
+    radius: city.radius,
+    brain: serializeBrainState(city.brain),
+    brainNodeDuration: city.brainNodeDuration,
+    brainDecision: cloneBrainDecision(city.brainDecision),
+    activeDemand: { ...city.activeDemand },
+    demandExpiresAt: city.demandExpiresAt,
+  };
+}
+
+function serializeRng(state: SimulationState): SerializedSimulationRng {
+  return {
+    root: state.rng.root.serialize(),
+    streams: {
+      world: state.rng.world.serialize(),
+      agentSpawn: state.rng.agentSpawn.serialize(),
+      tick: state.rng.tick.serialize(),
+      collectives: state.rng.collectives.serialize(),
+    },
+  };
+}
+
+function cloneBrainMultipliers(multipliers: AgentState['brainMultipliers']): AgentState['brainMultipliers'] {
+  const clone: AgentState['brainMultipliers'] = {};
+  if (multipliers.mood) {
+    clone.mood = { ...multipliers.mood };
+  }
+  if (multipliers.personality) {
+    clone.personality = { ...multipliers.personality };
+  }
+  if (multipliers.demand) {
+    clone.demand = { ...multipliers.demand };
+  }
+  return clone;
+}
+
+async function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('Failed to open IndexedDB.'));
+  });
+}
+
+function requestAsPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed.'));
+  });
+}
+
+function transactionComplete(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed.'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted.'));
+  });
+}
