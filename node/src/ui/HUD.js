@@ -1,3 +1,5 @@
+import { Inspector } from './Inspector.js';
+
 const DEFAULT_TICK_INTERVAL = 500;
 const MIN_TICK_INTERVAL = 50;
 const MAX_TICK_INTERVAL = 4000;
@@ -36,9 +38,19 @@ export class HUD {
     this._agentOptionIds = new Set();
     this._detachSceneSelectionListener = null;
 
+    this.host = document.createElement('div');
+    this.host.className = 'hud-overlay-stack';
+    this._applyHostStyles();
+    this.container.appendChild(this.host);
+
     this.root = document.createElement('div');
     this.root.className = 'hud-overlay';
     this._applyRootStyles();
+    this.host.appendChild(this.root);
+
+    this.inspector = new Inspector({ container: this.host });
+
+    this._latestAgentsById = new Map();
 
     this.headerEl = document.createElement('div');
     this.headerEl.textContent = 'Simulation HUD';
@@ -75,8 +87,6 @@ export class HUD {
         this._handleSceneSelectionChange,
       );
     }
-
-    this.container.appendChild(this.root);
   }
 
   updateFromSnapshot(snapshot) {
@@ -90,14 +100,32 @@ export class HUD {
 
     this.populationEl.textContent = formatStageStats(snapshot.stats);
 
+    this._latestAgentsById = new Map();
+    for (const agent of snapshot.agents ?? []) {
+      if (agent?.id) {
+        this._latestAgentsById.set(agent.id, agent);
+      }
+    }
+
     this._refreshAgentOptions(snapshot.agents ?? []);
+    this._updateInspectorSelection();
+  }
+
+  _applyHostStyles() {
+    Object.assign(this.host.style, {
+      position: 'fixed',
+      top: '16px',
+      left: '16px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+      alignItems: 'stretch',
+      zIndex: '100',
+    });
   }
 
   _applyRootStyles() {
     Object.assign(this.root.style, {
-      position: 'fixed',
-      top: '16px',
-      left: '16px',
       padding: '12px',
       background: 'rgba(15, 23, 42, 0.85)',
       color: '#f8fafc',
@@ -105,7 +133,6 @@ export class HUD {
       fontSize: '14px',
       borderRadius: '8px',
       boxShadow: '0 10px 30px rgba(2, 6, 23, 0.4)',
-      zIndex: '100',
       minWidth: '240px',
       pointerEvents: 'auto',
     });
@@ -322,19 +349,17 @@ export class HUD {
     }
   }
 
-  _handleSceneSelectionChange(agentId) {
-    if (!this.agentSelect) {
-      return;
+  _handleSceneSelectionChange(agentId, agent) {
+    if (this.agentSelect) {
+      if (!agentId || this._agentOptionIds.has(agentId)) {
+        const nextValue = agentId ?? '';
+        if (this.agentSelect.value !== nextValue) {
+          this.agentSelect.value = nextValue;
+        }
+      }
     }
 
-    if (agentId && !this._agentOptionIds.has(agentId)) {
-      return;
-    }
-
-    const nextValue = agentId ?? '';
-    if (this.agentSelect.value !== nextValue) {
-      this.agentSelect.value = nextValue;
-    }
+    this._updateInspectorSelection(agentId, agent);
   }
 
   _styleButton(button) {
@@ -369,5 +394,25 @@ export class HUD {
   _styleSelect(select) {
     this._styleInput(select);
     select.style.cursor = 'pointer';
+  }
+
+  _updateInspectorSelection(agentIdOverride, agentOverride) {
+    if (!this.inspector) {
+      return;
+    }
+
+    const selectedId = agentIdOverride ?? this.scene?.selectedAgentId ?? null;
+    let agent = agentOverride ?? null;
+
+    if (!agent && selectedId && this._latestAgentsById) {
+      agent = this._latestAgentsById.get(selectedId) ?? null;
+    }
+
+    if (!selectedId) {
+      this.inspector.setAgent(null);
+      return;
+    }
+
+    this.inspector.setAgent(agent ?? null);
   }
 }
