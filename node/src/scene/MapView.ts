@@ -18,6 +18,7 @@ const MIN_TILE_SIZE = 4;
 const MAX_TILE_SIZE = 10;
 const BACKGROUND_COLOR = '#050a12';
 const GRID_COLOR = 'rgba(30, 41, 59, 0.45)';
+const SELECT_RADIUS_TILES = 1.6;
 
 export type HeatmapLayer = 'influence' | 'density';
 
@@ -111,6 +112,34 @@ export class MapView {
 
   private readonly agentLayer: AgentLayer;
 
+  private readonly selectionListeners = new Set<
+    (agentId: string | null, agent: SnapshotAgent | null) => void
+  >();
+
+  private readonly handlePointerDown = (event: PointerEvent) => {
+    if (event.button != null && event.button !== 0) {
+      return;
+    }
+
+    const rect = this.canvas.getBoundingClientRect();
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+
+    const worldX = (canvasX - this.offsetX) / this.tileSize;
+    const worldY = (canvasY - this.offsetY) / this.tileSize;
+
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) {
+      return;
+    }
+
+    const nearest = this.findNearestAgent(worldX, worldY, SELECT_RADIUS_TILES);
+    if (!nearest) {
+      return;
+    }
+
+    this.setSelectedAgent(nearest.id);
+  };
+
   constructor({ container }: MapViewOptions) {
     if (!container) {
       throw new Error('MapView requires a host container element.');
@@ -146,6 +175,8 @@ export class MapView {
     this.container.appendChild(this.canvas);
 
     this.agentLayer = new AgentLayer({ container: this.container });
+
+    this.canvas.addEventListener('pointerdown', this.handlePointerDown);
 
     this.generateTerrain();
     this.resizeToDisplay();
@@ -207,6 +238,15 @@ export class MapView {
 
     this.agentLayer.updateAgents(snapshot.tick ?? null, snapshot.agents ?? []);
 
+    if (this.selectedAgentId) {
+      const stillExists = (snapshot.agents ?? []).some(
+        (agent) => agent?.id === this.selectedAgentId,
+      );
+      if (!stillExists) {
+        this.setSelectedAgent(null);
+      }
+    }
+
     const worldWidth = this.extractDimension(snapshot.world?.width, snapshot.world?.w);
     const worldHeight = this.extractDimension(snapshot.world?.height, snapshot.world?.h);
 
@@ -247,9 +287,24 @@ export class MapView {
 
   /** Forward compatibility with HUD agent selection controls. */
   setSelectedAgent(agentId: string | null) {
-    this.selectedAgentId = agentId ?? null;
+    const nextId = agentId ?? null;
+    if (this.selectedAgentId === nextId) {
+      return;
+    }
+
+    this.selectedAgentId = nextId;
     this.agentLayer.setSelectedAgent(this.selectedAgentId);
     this.agentLayer.render();
+    this.emitSelectionChange();
+  }
+
+  onSelectedAgentChange(
+    listener: (agentId: string | null, agent: SnapshotAgent | null) => void,
+  ) {
+    this.selectionListeners.add(listener);
+    return () => {
+      this.selectionListeners.delete(listener);
+    };
   }
 
   /** Update aggregated heatmap stats and schedule redraw. */
@@ -468,5 +523,49 @@ export class MapView {
     };
 
     this.setHeatmapAggregates(aggregates);
+  }
+
+  private emitSelectionChange() {
+    const agent = this.selectedAgentId ? this.findAgentById(this.selectedAgentId) : null;
+    for (const listener of this.selectionListeners) {
+      listener(this.selectedAgentId, agent);
+    }
+  }
+
+  private findAgentById(agentId: string | null) {
+    if (!agentId || !this.latestSnapshot?.agents) {
+      return null;
+    }
+    for (const agent of this.latestSnapshot.agents) {
+      if (agent?.id === agentId) {
+        return agent;
+      }
+    }
+    return null;
+  }
+
+  private findNearestAgent(x: number, y: number, maxDistanceTiles: number) {
+    if (!this.latestSnapshot?.agents || this.latestSnapshot.agents.length === 0) {
+      return null;
+    }
+
+    const maxDistanceSq = maxDistanceTiles * maxDistanceTiles;
+    let closest: SnapshotAgent | null = null;
+    let closestDistanceSq = maxDistanceSq;
+
+    for (const agent of this.latestSnapshot.agents) {
+      if (!agent) continue;
+      const ax = Number.isFinite(agent.x) ? Number(agent.x) : 0;
+      const ay = Number.isFinite(agent.y) ? Number(agent.y) : 0;
+      const dx = ax - x;
+      const dy = ay - y;
+      const distanceSq = dx * dx + dy * dy;
+      if (distanceSq <= closestDistanceSq) {
+        closestDistanceSq = distanceSq;
+        closest = agent;
+      }
+    }
+
+    return closest;
   }
 }
