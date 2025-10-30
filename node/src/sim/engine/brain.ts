@@ -5,6 +5,13 @@ import houseMindRaw from '../data/HouseMind_v1.json?raw';
 import teenMindRaw from '../data/TeenMind_v1.json?raw';
 import urbanMindRaw from '../data/UrbanMind_v1.json?raw';
 import { JUMP_EDGE_DEFINITIONS } from './traits.ts';
+import {
+  advancePlasticityState,
+  applyPlasticityToWeight,
+  createPlasticityState,
+  registerPlasticityTransition,
+  type PlasticityState,
+} from './plasticity.ts';
 
 export interface BrainNodeDefinition {
   id: string;
@@ -78,6 +85,7 @@ export interface BrainState {
   activeJumpEdges: Map<string, ActiveJumpEdgeState>;
   dynamicEdgesFrom: Map<string, BrainEdgeMetadata[]>;
   jumpEdgeCooldowns: JumpEdgeCooldownMap;
+  plasticity: PlasticityState;
 }
 
 export interface BrainMultiplierSet {
@@ -193,6 +201,7 @@ export function createBrainState(brainId: string): BrainState {
     activeJumpEdges: new Map(),
     dynamicEdgesFrom: new Map(),
     jumpEdgeCooldowns: {},
+    plasticity: createPlasticityState(),
   };
 }
 
@@ -227,6 +236,7 @@ export function tickBrain(
   moodLevels: Record<string, number> = {},
 ): BrainTickResult {
   const brain = requireBrain(state.brainId);
+  advancePlasticityState(state.plasticity);
   updateJumpEdges(state, brain, multipliers, moodLevels);
   let decision: BrainDecision | null = null;
 
@@ -235,12 +245,16 @@ export function tickBrain(
   } else {
     const candidates = evaluateCandidates(brain, state, state.currentNodeId, multipliers);
     const chosen = candidates.length > 0 ? candidates[0] : null;
-    const nextNodeId = chosen ? chosen.nodeId : state.currentNodeId;
+    const fromNodeId = state.currentNodeId;
+    const nextNodeId = chosen ? chosen.nodeId : fromNodeId;
     decision = {
-      fromNodeId: state.currentNodeId,
+      fromNodeId,
       candidates,
       chosenNodeId: nextNodeId,
     };
+    if (chosen) {
+      registerPlasticityTransition(state.plasticity, fromNodeId, chosen.nodeId);
+    }
     state.lastDecision = decision;
     resetNodeTimer(state, nextNodeId);
   }
@@ -269,15 +283,16 @@ function evaluateCandidates(
   const candidates: BrainDecisionFactor[] = [];
   for (const edge of sourceEdges) {
     const targetNode = requireNode(brain, edge.targetId);
+    const adjustedWeight = applyPlasticityToWeight(state.plasticity, sourceNodeId, edge.targetId, edge.weight);
     const moodMultiplier = productForTags(targetNode.tags, multipliers.mood);
     const personalityMultiplier = productForTags(targetNode.tags, multipliers.personality);
     const demandMultiplier = productForTags(targetNode.tags, multipliers.demand);
     const desirability =
-      edge.weight * targetNode.baseFrequency * moodMultiplier * personalityMultiplier * demandMultiplier;
+      adjustedWeight * targetNode.baseFrequency * moodMultiplier * personalityMultiplier * demandMultiplier;
     candidates.push({
       nodeId: targetNode.id,
       desirability,
-      edgeWeight: edge.weight,
+      edgeWeight: adjustedWeight,
       baseFrequency: targetNode.baseFrequency,
       moodMultiplier,
       personalityMultiplier,
