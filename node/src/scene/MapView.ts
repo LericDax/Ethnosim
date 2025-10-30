@@ -1,3 +1,5 @@
+import { AgentLayer } from './AgentLayer.ts';
+
 const TERRAIN_COLORS: Record<string, string> = {
   town: '#111821',
   plains: '#1f2733',
@@ -26,10 +28,19 @@ export interface SnapshotWorld {
   h?: number;
 }
 
+export interface SnapshotAgent {
+  id: string;
+  x: number;
+  y: number;
+  lifeStage: 'baby' | 'child' | 'teen' | 'adult';
+}
+
 export interface Snapshot {
   type?: string;
+  tick?: number;
   world?: SnapshotWorld;
   stats?: Record<string, number>;
+  agents?: SnapshotAgent[];
 }
 
 export interface MapViewOptions {
@@ -98,6 +109,8 @@ export class MapView {
 
   public selectedAgentId: string | null = null;
 
+  private readonly agentLayer: AgentLayer;
+
   constructor({ container }: MapViewOptions) {
     if (!container) {
       throw new Error('MapView requires a host container element.');
@@ -119,6 +132,9 @@ export class MapView {
       height: '100%',
       display: 'block',
       imageRendering: 'pixelated',
+      position: 'absolute',
+      inset: '0',
+      zIndex: '1',
     });
 
     const context = this.canvas.getContext('2d');
@@ -128,6 +144,8 @@ export class MapView {
 
     this.ctx = context;
     this.container.appendChild(this.canvas);
+
+    this.agentLayer = new AgentLayer({ container: this.container });
 
     this.generateTerrain();
     this.resizeToDisplay();
@@ -164,6 +182,17 @@ export class MapView {
     this.offsetX = Math.floor((displayWidth - mapPixelWidth) / 2);
     this.offsetY = Math.floor((displayHeight - mapPixelHeight) / 2);
 
+    this.agentLayer.updateViewport({
+      displayWidth,
+      displayHeight,
+      devicePixelRatio: this.devicePixelRatio,
+      tileSize: this.tileSize,
+      offsetX: this.offsetX,
+      offsetY: this.offsetY,
+      worldWidth: this.worldWidth,
+      worldHeight: this.worldHeight,
+    });
+
     this.needsRedraw = true;
     this.requestDraw();
   }
@@ -175,6 +204,8 @@ export class MapView {
     }
 
     this.latestSnapshot = snapshot;
+
+    this.agentLayer.updateAgents(snapshot.tick ?? null, snapshot.agents ?? []);
 
     const worldWidth = this.extractDimension(snapshot.world?.width, snapshot.world?.w);
     const worldHeight = this.extractDimension(snapshot.world?.height, snapshot.world?.h);
@@ -217,6 +248,8 @@ export class MapView {
   /** Forward compatibility with HUD agent selection controls. */
   setSelectedAgent(agentId: string | null) {
     this.selectedAgentId = agentId ?? null;
+    this.agentLayer.setSelectedAgent(this.selectedAgentId);
+    this.agentLayer.render();
   }
 
   /** Update aggregated heatmap stats and schedule redraw. */
@@ -276,6 +309,8 @@ export class MapView {
       this.drawGridLines();
     }
     this.ctx.restore();
+
+    this.agentLayer.render();
   }
 
   private drawTerrain() {
