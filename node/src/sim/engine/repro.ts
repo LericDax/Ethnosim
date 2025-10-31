@@ -4,6 +4,7 @@ import type { AgentState, SimulationState, Temperament } from '../sim.worker.ts'
 import type { RngStream } from './rng.ts';
 import { createFetusTemperament, applyGestationalStress } from './temperament.ts';
 import { createTraitProfile } from './traits.ts';
+import { sampleChromosomes } from './chromosomes.ts';
 
 const CONCEPTION_RATE_MULTIPLIER = 0.02;
 export const GESTATION_TICKS = 200;
@@ -21,7 +22,7 @@ export function handleReproduction(simulation: SimulationState): void {
   for (const agent of simulation.agents) {
     if (
       agent.lifeStage !== 'adult' ||
-      agent.sexBody !== 'female' ||
+      !agent.reproductiveRoles.includes('gestator') ||
       agent.fertility <= 0 ||
       agent.pregnancy ||
       !agent.bondPartnerId
@@ -30,7 +31,7 @@ export function handleReproduction(simulation: SimulationState): void {
     }
 
     const partner = agentsById.get(agent.bondPartnerId);
-    if (!partner) {
+    if (!partner || !partner.reproductiveRoles.includes('fertilizer')) {
       continue;
     }
 
@@ -112,7 +113,7 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
   const id = `agent-${simulation.nextAgentId}`;
   simulation.nextAgentId += 1;
 
-  const sexBody = simulation.rng.tick.nextFloat() < 0.5 ? 'female' : 'male';
+  const chromosomes = sampleChromosomes(simulation.chromosomeRegistry, simulation.rng.tick);
   const genderRoll = simulation.rng.tick.nextFloat();
   const genderIdentity = genderRoll < 0.4 ? 'man' : genderRoll < 0.8 ? 'woman' : 'nonbinary';
 
@@ -141,7 +142,8 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     brainMultipliers: buildBrainMultipliersFromProfile(traitProfile),
     brainNodeDuration: brainMetadata.duration,
     brainDecision: null,
-    sexBody,
+    chromosomes,
+    reproductiveRoles: [...chromosomes.roles],
     genderIdentity,
     fertility: 0,
     pregnancy: null,

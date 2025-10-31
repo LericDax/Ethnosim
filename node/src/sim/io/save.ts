@@ -5,6 +5,11 @@ import type { SerializedSeededRng, SerializedRngStream } from '../engine/rng.ts'
 import type { WorldState } from '../engine/world.ts';
 import type { AgentState, PregnancyState } from '../sim.worker.ts';
 import type { CityState, HouseState } from '../engine/collectives.ts';
+import {
+  cloneAgentChromosomes,
+  cloneChromosomeRegistry,
+  type ChromosomeRegistry,
+} from '../engine/chromosomes.ts';
 
 export const DB_NAME = 'ethnosim-snapshots';
 export const STORE_NAME = 'snapshots';
@@ -25,7 +30,9 @@ export interface SerializedAgentState {
   brainMultipliers: AgentState['brainMultipliers'];
   brainNodeDuration: number;
   brainDecision: BrainDecision | null;
-  sexBody: AgentState['sexBody'];
+  chromosomes: AgentState['chromosomes'];
+  reproductiveRoles: AgentState['reproductiveRoles'];
+  sexBody?: 'male' | 'female';
   genderIdentity: AgentState['genderIdentity'];
   fertility: number;
   pregnancy: PregnancyState | null;
@@ -98,6 +105,7 @@ export interface SerializedSimulationState {
   rng: SerializedSimulationRng;
   stageCounts: SimulationState['stageCounts'];
   nextAgentId: number;
+  chromosomes: ChromosomeRegistry;
 }
 
 export interface PersistedSnapshotRecord {
@@ -122,6 +130,7 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     rng: serializeRng(state),
     stageCounts: { ...state.stageCounts },
     nextAgentId: state.nextAgentId,
+    chromosomes: cloneChromosomeRegistry(state.chromosomeRegistry),
   };
 }
 
@@ -173,7 +182,8 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     brainMultipliers: cloneBrainMultipliers(agent.brainMultipliers),
     brainNodeDuration: agent.brainNodeDuration,
     brainDecision: cloneBrainDecision(agent.brainDecision),
-    sexBody: agent.sexBody,
+    chromosomes: cloneAgentChromosomes(agent.chromosomes),
+    reproductiveRoles: [...agent.reproductiveRoles],
     genderIdentity: agent.genderIdentity,
     fertility: agent.fertility,
     pregnancy: agent.pregnancy ? { ...agent.pregnancy, fetusTemperament: { ...agent.pregnancy.fetusTemperament } } : null,
