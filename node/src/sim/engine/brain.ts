@@ -5,6 +5,7 @@ import houseMindRaw from '../data/HouseMind_v1.json?raw';
 import teenMindRaw from '../data/TeenMind_v1.json?raw';
 import urbanMindRaw from '../data/UrbanMind_v1.json?raw';
 import { JUMP_EDGE_DEFINITIONS } from './traits.ts';
+import type { RngStream } from './rng.ts';
 import {
   advancePlasticityState,
   applyPlasticityToWeight,
@@ -77,6 +78,27 @@ export interface BrainDecision {
   chosenNodeId: string;
 }
 
+interface BrainPulse {
+  id: string;
+  edgeKey: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  startedTick: number;
+  travelDuration: number;
+  elapsed: number;
+  strength: number;
+}
+
+export interface BrainPulseEvent {
+  id: string;
+  edgeKey: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  startedTick: number;
+  travelDuration: number;
+  strength: number;
+}
+
 export interface BrainState {
   brainId: string;
   currentNodeId: string;
@@ -87,6 +109,10 @@ export interface BrainState {
   dynamicEdgesFrom: Map<string, BrainEdgeMetadata[]>;
   jumpEdgeCooldowns: JumpEdgeCooldownMap;
   plasticity: PlasticityState;
+  pendingPulses: BrainPulse[];
+  nodeCharge: Map<string, number>;
+  pulseEvents: BrainPulseEvent[];
+  nextPulseId: number;
 }
 
 export interface SerializedActiveJumpEdgeState {
@@ -116,6 +142,21 @@ export interface SerializedBrainState {
   dynamicEdgesFrom: SerializedDynamicEdgeEntry[];
   jumpEdgeCooldowns: JumpEdgeCooldownMap;
   plasticity: SerializedPlasticityState;
+  pendingPulses: SerializedBrainPulse[];
+  nodeCharge: Record<string, number>;
+  pulseEvents: BrainPulseEvent[];
+  nextPulseId: number;
+}
+
+interface SerializedBrainPulse {
+  id: string;
+  edgeKey: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  startedTick: number;
+  travelDuration: number;
+  elapsed: number;
+  strength: number;
 }
 
 export interface BrainMultiplierSet {
@@ -140,6 +181,12 @@ const RAW_BRAINS: BrainGraphDefinition[] = [
 const BRAIN_LIBRARY: BrainLibrary = Object.fromEntries(
   RAW_BRAINS.map((definition) => [definition.name, buildRuntimeGraph(definition)]),
 );
+
+const PULSE_THRESHOLD = 1;
+const PULSE_EVENT_TTL = 128;
+const PULSE_LEAK_MULTIPLIER = 0.96;
+const PULSE_JITTER_RANGE = 0.18;
+const MIN_CHARGE_VALUE = 1e-4;
 
 function parseBrainJson(raw: string): BrainGraphDefinition {
   try {
@@ -232,6 +279,10 @@ export function createBrainState(brainId: string): BrainState {
     dynamicEdgesFrom: new Map(),
     jumpEdgeCooldowns: {},
     plasticity: createPlasticityState(),
+    pendingPulses: [],
+    nodeCharge: new Map(),
+    pulseEvents: [],
+    nextPulseId: 1,
   };
 }
 
@@ -276,6 +327,27 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       tick: state.plasticity.tick,
       edges: plasticityEdges,
     },
+    pendingPulses: state.pendingPulses.map((pulse) => ({
+      id: pulse.id,
+      edgeKey: pulse.edgeKey,
+      sourceNodeId: pulse.sourceNodeId,
+      targetNodeId: pulse.targetNodeId,
+      startedTick: pulse.startedTick,
+      travelDuration: pulse.travelDuration,
+      elapsed: pulse.elapsed,
+      strength: pulse.strength,
+    })),
+    nodeCharge: Object.fromEntries(state.nodeCharge.entries()),
+    pulseEvents: state.pulseEvents.map((event) => ({
+      id: event.id,
+      edgeKey: event.edgeKey,
+      sourceNodeId: event.sourceNodeId,
+      targetNodeId: event.targetNodeId,
+      startedTick: event.startedTick,
+      travelDuration: event.travelDuration,
+      strength: event.strength,
+    })),
+    nextPulseId: state.nextPulseId,
   } satisfies SerializedBrainState;
 }
 
@@ -306,6 +378,27 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
 
   base.jumpEdgeCooldowns = { ...(serialized.jumpEdgeCooldowns ?? {}) };
   base.plasticity = restorePlasticityState(serialized.plasticity);
+  base.pendingPulses = (serialized.pendingPulses ?? []).map((pulse) => ({
+    id: pulse.id,
+    edgeKey: pulse.edgeKey,
+    sourceNodeId: pulse.sourceNodeId,
+    targetNodeId: pulse.targetNodeId,
+    startedTick: pulse.startedTick,
+    travelDuration: pulse.travelDuration,
+    elapsed: pulse.elapsed,
+    strength: pulse.strength,
+  }));
+  base.nodeCharge = new Map(Object.entries(serialized.nodeCharge ?? {}));
+  base.pulseEvents = (serialized.pulseEvents ?? []).map((event) => ({
+    id: event.id,
+    edgeKey: event.edgeKey,
+    sourceNodeId: event.sourceNodeId,
+    targetNodeId: event.targetNodeId,
+    startedTick: event.startedTick,
+    travelDuration: event.travelDuration,
+    strength: event.strength,
+  }));
+  base.nextPulseId = typeof serialized.nextPulseId === 'number' ? serialized.nextPulseId : 1;
   return base;
 }
 
@@ -334,36 +427,82 @@ export interface BrainTickResult {
   decision: BrainDecision | null;
 }
 
+export interface BrainTickContext {
+  rng?: RngStream | null;
+  tick?: number;
+}
+
 export function tickBrain(
   state: BrainState,
   multipliers: BrainMultiplierSet = {},
   moodLevels: Record<string, number> = {},
+  context: BrainTickContext = {},
 ): BrainTickResult {
   const brain = requireBrain(state.brainId);
   advancePlasticityState(state.plasticity);
   updateJumpEdges(state, brain, multipliers, moodLevels);
   let decision: BrainDecision | null = null;
+  const metadata = requireNode(brain, state.currentNodeId);
+  const candidates = evaluateCandidates(brain, state, state.currentNodeId, multipliers);
 
-  if (state.nodeTimer > 1) {
-    state.nodeTimer -= 1;
-  } else {
-    const candidates = evaluateCandidates(brain, state, state.currentNodeId, multipliers);
-    const chosen = candidates.length > 0 ? candidates[0] : null;
+  if (candidates.length === 0) {
+    if (state.nodeTimer > 0) {
+      state.nodeTimer = Math.max(0, state.nodeTimer - 1);
+    } else {
+      resetNodeTimer(state, state.currentNodeId);
+      decision = {
+        fromNodeId: state.currentNodeId,
+        candidates: [],
+        chosenNodeId: state.currentNodeId,
+      };
+      state.lastDecision = decision;
+    }
+    return {
+      state,
+      nodeDuration: metadata.duration,
+      decision: decision ?? state.lastDecision,
+    };
+  }
+
+  distributePulseBudget(state, candidates, metadata, context);
+  const deposits = advancePendingPulses(state);
+  applyNodeChargeDecay(state);
+  for (const [targetId, strength] of deposits.entries()) {
+    if (strength <= 0) {
+      continue;
+    }
+    const existing = state.nodeCharge.get(targetId) ?? 0;
+    state.nodeCharge.set(targetId, existing + strength);
+  }
+
+  if (state.nodeTimer > 0) {
+    state.nodeTimer = Math.max(0, state.nodeTimer - 1);
+  }
+
+  if (state.nodeTimer <= 0) {
+    const bestCandidate = candidates[0];
+    if (bestCandidate) {
+      const currentCharge = state.nodeCharge.get(bestCandidate.nodeId) ?? 0;
+      if (currentCharge < PULSE_THRESHOLD) {
+        state.nodeCharge.set(bestCandidate.nodeId, PULSE_THRESHOLD);
+      }
+    }
+  }
+
+  const readyTarget = resolveReadyTarget(state, candidates);
+  if (readyTarget) {
     const fromNodeId = state.currentNodeId;
-    const nextNodeId = chosen ? chosen.nodeId : fromNodeId;
+    const nextNodeId = readyTarget.nodeId;
     decision = {
       fromNodeId,
       candidates,
       chosenNodeId: nextNodeId,
     };
-    if (chosen) {
-      registerPlasticityTransition(state.plasticity, fromNodeId, chosen.nodeId);
-    }
+    registerPlasticityTransition(state.plasticity, fromNodeId, nextNodeId);
     state.lastDecision = decision;
-    resetNodeTimer(state, nextNodeId);
+    commitBrainTransition(state, nextNodeId);
   }
 
-  const metadata = requireNode(brain, state.currentNodeId);
   return {
     state,
     nodeDuration: metadata.duration,
@@ -389,6 +528,157 @@ export function cloneBrainDecision(decision: BrainDecision | null): BrainDecisio
       tags: [...candidate.tags],
     })),
   } satisfies BrainDecision;
+}
+
+function distributePulseBudget(
+  state: BrainState,
+  candidates: BrainDecisionFactor[],
+  metadata: BrainNodeMetadata,
+  context: BrainTickContext,
+): void {
+  const duration = Math.max(1, metadata.duration);
+  const baseBudget = 1 / duration;
+  const totalDesirability = candidates.reduce((sum, candidate) => {
+    return candidate.desirability > 0 ? sum + candidate.desirability : sum;
+  }, 0);
+  if (totalDesirability <= 0 || baseBudget <= 0) {
+    return;
+  }
+
+  prunePulseEvents(state, context.tick);
+
+  const rng = context.rng ?? null;
+  const jitterRange = PULSE_JITTER_RANGE;
+  const travelDuration = Math.max(1, Math.round(duration * 0.5));
+  const currentTick = typeof context.tick === 'number' ? context.tick : 0;
+
+  const provisionalStrengths: number[] = [];
+  for (const candidate of candidates) {
+    if (candidate.desirability <= 0) {
+      provisionalStrengths.push(0);
+      continue;
+    }
+    const share = candidate.desirability / totalDesirability;
+    let jitter = 0;
+    if (rng) {
+      jitter = (rng.nextFloat() * 2 - 1) * jitterRange;
+    }
+    const strength = Math.max(0, baseBudget * share * (1 + jitter));
+    provisionalStrengths.push(strength);
+  }
+
+  const provisionalTotal = provisionalStrengths.reduce((sum, value) => sum + value, 0);
+  const normalization = provisionalTotal > 0 ? baseBudget / provisionalTotal : 0;
+
+  const normalizedStrengths = provisionalStrengths.map((value) => value * normalization);
+  const nextPending: BrainPulse[] = [];
+  const nextEvents: BrainPulseEvent[] = [];
+  let index = 0;
+  for (const candidate of candidates) {
+    const strength = normalizedStrengths[index];
+    index += 1;
+    if (!strength || strength <= MIN_CHARGE_VALUE) {
+      continue;
+    }
+    const pulseId = `pulse-${state.nextPulseId}`;
+    state.nextPulseId += 1;
+    const edgeKey = makeEdgeKey(state.currentNodeId, candidate.nodeId);
+    const pulse: BrainPulse = {
+      id: pulseId,
+      edgeKey,
+      sourceNodeId: state.currentNodeId,
+      targetNodeId: candidate.nodeId,
+      startedTick: currentTick,
+      travelDuration,
+      elapsed: 0,
+      strength,
+    };
+    nextPending.push(pulse);
+    nextEvents.push({
+      id: pulseId,
+      edgeKey,
+      sourceNodeId: pulse.sourceNodeId,
+      targetNodeId: pulse.targetNodeId,
+      startedTick: currentTick,
+      travelDuration,
+      strength,
+    });
+  }
+
+  if (nextPending.length > 0) {
+    state.pendingPulses.push(...nextPending);
+  }
+  if (nextEvents.length > 0) {
+    state.pulseEvents.push(...nextEvents);
+  }
+}
+
+function advancePendingPulses(state: BrainState): Map<string, number> {
+  if (state.pendingPulses.length === 0) {
+    return new Map();
+  }
+  const deposits = new Map<string, number>();
+  const remaining: BrainPulse[] = [];
+  for (const pulse of state.pendingPulses) {
+    pulse.elapsed += 1;
+    if (pulse.elapsed >= pulse.travelDuration) {
+      const existing = deposits.get(pulse.targetNodeId) ?? 0;
+      deposits.set(pulse.targetNodeId, existing + pulse.strength);
+    } else {
+      remaining.push(pulse);
+    }
+  }
+  state.pendingPulses = remaining;
+  return deposits;
+}
+
+function applyNodeChargeDecay(state: BrainState): void {
+  if (state.nodeCharge.size === 0) {
+    return;
+  }
+  for (const [nodeId, value] of state.nodeCharge.entries()) {
+    const decayed = value * PULSE_LEAK_MULTIPLIER;
+    if (decayed <= MIN_CHARGE_VALUE) {
+      state.nodeCharge.delete(nodeId);
+    } else {
+      state.nodeCharge.set(nodeId, decayed);
+    }
+  }
+}
+
+function resolveReadyTarget(
+  state: BrainState,
+  candidates: BrainDecisionFactor[],
+): BrainDecisionFactor | null {
+  for (const candidate of candidates) {
+    const charge = state.nodeCharge.get(candidate.nodeId) ?? 0;
+    if (charge >= PULSE_THRESHOLD) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function commitBrainTransition(state: BrainState, nextNodeId: string): void {
+  state.currentNodeId = nextNodeId;
+  state.pendingPulses = [];
+  state.nodeCharge.clear();
+  resetNodeTimer(state);
+}
+
+function prunePulseEvents(state: BrainState, currentTick?: number): void {
+  if (typeof currentTick !== 'number' || currentTick <= 0) {
+    return;
+  }
+  const threshold = currentTick - PULSE_EVENT_TTL;
+  if (threshold <= 0) {
+    return;
+  }
+  state.pulseEvents = state.pulseEvents.filter((event) => event.startedTick >= threshold);
+}
+
+function makeEdgeKey(sourceId: string, targetId: string): string {
+  return `${sourceId}->${targetId}`;
 }
 
 function evaluateCandidates(
