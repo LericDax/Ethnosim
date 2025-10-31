@@ -17,6 +17,7 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
   expect(Array.isArray(snapshot.agents)).toBe(true);
   expect(Array.isArray(snapshot.houses)).toBe(true);
   expect(Array.isArray(snapshot.demands)).toBe(true);
+  expect(Array.isArray(snapshot.decisions)).toBe(true);
 
   for (const agent of snapshot.agents) {
     expect(typeof agent.id).toBe('string');
@@ -57,6 +58,12 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof snapshot.city.authority).toBe('number');
     expect(snapshot.city.brain.summary.brainId).toBeTruthy();
     expect(typeof snapshot.city.demandExpiresAt).toBe('number');
+  }
+
+  for (const decision of snapshot.decisions) {
+    expect(typeof decision.agent_id).toBe('string');
+    expect(typeof decision.from).toBe('string');
+    expect(typeof decision.to).toBe('string');
   }
 }
 
