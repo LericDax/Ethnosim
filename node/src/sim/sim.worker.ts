@@ -827,6 +827,9 @@ function computeStageCounts(agents: AgentState[]): StageCounts {
 }
 
 function clamp01(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
   if (value <= 0) {
     return 0;
   }
@@ -1241,19 +1244,6 @@ function sanitizeResourceValue(value: number | undefined): number {
     return 0;
   }
   return value < 0 ? 0 : value;
-}
-
-function clamp01(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-  if (value <= 0) {
-    return 0;
-  }
-  if (value >= 1) {
-    return 1;
-  }
-  return value;
 }
 
 function roundTo(value: number, decimals = 3): number {
