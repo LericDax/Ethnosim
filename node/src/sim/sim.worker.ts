@@ -186,6 +186,13 @@ interface SnapshotBrainPulse {
   edgeId: string;
   progress: number;
   strength: number;
+  payload?: number;
+  payloadRate?: number;
+  rate?: number;
+  durationTicks?: number;
+  travelDurationTicks?: number;
+  elapsedTicks?: number;
+  remainingTicks?: number;
   appearance?: BrainPulseAppearance;
   color?: string;
   glow?: number;
@@ -1282,8 +1289,17 @@ function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
       if (!edgeId) {
         return null;
       }
+      const durationTicks = Math.max(1, Math.round(pulse.travelDuration ?? 1));
+      const elapsedTicks = Math.max(0, Math.min(durationTicks, Math.round(pulse.elapsed ?? 0)));
+      const remainingTicks = Math.max(0, durationTicks - elapsedTicks);
+      const payload = Number.isFinite(pulse.payload) ? pulse.payload : pulse.strength;
+      const payloadRate = Number.isFinite(pulse.payloadRate)
+        ? pulse.payloadRate
+        : durationTicks > 0
+          ? payload / durationTicks
+          : payload;
       const progress = clamp01(
-        pulse.travelDuration > 0 ? pulse.elapsed / pulse.travelDuration : pulse.elapsed > 0 ? 1 : 0,
+        durationTicks > 0 ? elapsedTicks / durationTicks : elapsedTicks > 0 ? 1 : 0,
       );
       const strength = clamp01(pulse.strength);
       const descriptor: SnapshotBrainPulse = {
@@ -1291,6 +1307,13 @@ function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
         edgeId,
         progress: roundTo(progress),
         strength: roundTo(strength),
+        payload: roundTo(payload),
+        payloadRate: roundTo(payloadRate),
+        rate: roundTo(payloadRate),
+        durationTicks,
+        travelDurationTicks: durationTicks,
+        elapsedTicks,
+        remainingTicks,
       };
       if (pulse.appearance) {
         const appearance: BrainPulseAppearance = { ...pulse.appearance };
@@ -1346,7 +1369,12 @@ function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
     return pulses;
   }
   return pulses
-    .sort((a, b) => b.progress - a.progress || b.strength - a.strength)
+    .sort(
+      (a, b) =>
+        b.progress - a.progress ||
+        (Number(b.payload ?? 0) - Number(a.payload ?? 0)) ||
+        b.strength - a.strength,
+    )
     .slice(0, MAX_SNAPSHOT_PULSES);
 }
 

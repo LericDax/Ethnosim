@@ -21,6 +21,15 @@ const PARTICLE_MAX_OPACITY = 0.98;
 const PARTICLE_BASE_SIZE = 3.1;
 const PARTICLE_SIZE_RANGE = 3.6;
 const PARTICLE_MIN_SIZE = 2.4;
+const PARTICLE_LOAD_SIZE_MULTIPLIER = 0.9;
+const PARTICLE_LOAD_OPACITY_MULTIPLIER = 0.35;
+const PARTICLE_RATE_BRIGHTNESS_MULTIPLIER = 0.25;
+const PARTICLE_LOAD_GLOW_MULTIPLIER = 0.6;
+const PARTICLE_RATE_GLOW_MULTIPLIER = 0.45;
+const PULSE_VIEWER_REFERENCE_PAYLOAD = 0.24;
+const PULSE_VIEWER_REFERENCE_RATE = 0.08;
+const PULSE_VIEWER_MAX_LOAD_RATIO = 6;
+const PULSE_VIEWER_MAX_RATE_RATIO = 4;
 
 const PULSE_FAMILY_THEMES = {
   default: Object.freeze({ family: 'default', color: PARTICLE_COLOR, glowColor: 'rgba(125, 211, 252, 0.42)' }),
@@ -89,9 +98,13 @@ function computeDataSignature(data) {
   const pulsesPart = Array.isArray(data.pulses)
     ? data.pulses
         .map((pulse) =>
-          `${pulse?.id ?? pulse?.edgeId ?? ''}:${Number(pulse?.startedAt ?? pulse?.startedAtTick ?? 0).toFixed(3)}:${Number(
-            pulse?.strength ?? 0,
-          ).toFixed(3)}:${Number(pulse?.durationTicks ?? pulse?.duration ?? 0).toFixed(3)}`,
+          `${
+            pulse?.id ?? pulse?.edgeId ?? ''
+          }:${Number(pulse?.startedAt ?? pulse?.startedAtTick ?? 0).toFixed(3)}:${Number(pulse?.strength ?? 0).toFixed(3)}:${Number(
+            pulse?.payload ?? pulse?.load ?? 0,
+          ).toFixed(3)}:${Number(pulse?.payloadRate ?? pulse?.rate ?? 0).toFixed(3)}:${Number(
+            pulse?.durationTicks ?? pulse?.travelDurationTicks ?? pulse?.duration ?? 0,
+          ).toFixed(3)}`,
         )
         .sort()
         .join(';')
@@ -736,7 +749,31 @@ export class BrainViewer {
       if (!id) {
         return;
       }
-      const durationMs = this._resolvePulseDurationMs(descriptor, tickDurationMs, edgeId);
+      const payload = Math.max(
+        0,
+        Number(
+          descriptor.payload ??
+            descriptor.load ??
+            descriptor.strength ??
+            descriptor.intensity ??
+            0,
+        ),
+      );
+      const rawPayloadRate = Number(descriptor.payloadRate ?? descriptor.rate ?? 0);
+      let payloadRate = Number.isFinite(rawPayloadRate) ? Math.max(0, rawPayloadRate) : 0;
+      const descriptorDurationTicks = Number(
+        descriptor.durationTicks ?? descriptor.travelDurationTicks ?? null,
+      );
+      if (payloadRate <= 0 && Number.isFinite(descriptorDurationTicks) && descriptorDurationTicks > 0 && payload > 0) {
+        payloadRate = payload / descriptorDurationTicks;
+      }
+      const durationMs = this._resolvePulseDurationMs(
+        descriptor,
+        tickDurationMs,
+        edgeId,
+        payload,
+        payloadRate,
+      );
       const startedAtSimMs = this._resolvePulseStartSimMs(
         descriptor,
         tickDurationMs,
@@ -751,6 +788,19 @@ export class BrainViewer {
       pulse.durationMs = durationMs;
       pulse.startedAtSimMs = startedAtSimMs;
       pulse.strength = strength;
+      pulse.payload = payload;
+      pulse.payloadRate = payloadRate;
+      pulse.loadRatio = payload > 0
+        ? Math.min(payload / PULSE_VIEWER_REFERENCE_PAYLOAD, PULSE_VIEWER_MAX_LOAD_RATIO)
+        : 0;
+      pulse.rateRatio = payloadRate > 0
+        ? Math.min(payloadRate / PULSE_VIEWER_REFERENCE_RATE, PULSE_VIEWER_MAX_RATE_RATIO)
+        : 0;
+      pulse.durationTicks = Number.isFinite(descriptorDurationTicks) && descriptorDurationTicks > 0
+        ? descriptorDurationTicks
+        : payloadRate > 0 && payload > 0
+          ? payload / payloadRate
+          : null;
       pulse.appearance = appearance;
       pulse.segment = null;
       pulse.descriptor = descriptor;
@@ -796,11 +846,13 @@ export class BrainViewer {
     return null;
   }
 
-  _resolvePulseDurationMs(descriptor, tickDurationMs, edgeId) {
+  _resolvePulseDurationMs(descriptor, tickDurationMs, edgeId, payload = 0, payloadRate = 0) {
     const durationCandidates = [
       descriptor.durationMs,
       descriptor.duration_ms,
       descriptor.durationMilliseconds,
+      descriptor.travelDurationMs,
+      descriptor.travel_duration_ms,
       descriptor.duration,
     ];
     for (const candidate of durationCandidates) {
@@ -810,7 +862,14 @@ export class BrainViewer {
       }
     }
 
-    const tickCandidates = [descriptor.durationTicks, descriptor.duration_ticks, descriptor.ticks];
+    const tickCandidates = [
+      descriptor.durationTicks,
+      descriptor.duration_ticks,
+      descriptor.ticks,
+      descriptor.travelDurationTicks,
+      descriptor.travel_duration_ticks,
+      descriptor.travelDuration,
+    ];
     for (const candidate of tickCandidates) {
       const numeric = Number(candidate);
       if (Number.isFinite(numeric) && numeric > 0) {
@@ -823,11 +882,26 @@ export class BrainViewer {
 
     const toNodeId = this._parseEdgeTarget(edgeId);
     const fallbackTicks = this._resolveNodeDuration(toNodeId);
-    if (Number.isFinite(fallbackTicks) && fallbackTicks > 0 && Number.isFinite(tickDurationMs) && tickDurationMs > 0) {
-      return fallbackTicks * tickDurationMs;
+    let resolved = null;
+    if (Number.isFinite(fallbackTicks) && fallbackTicks > 0) {
+      resolved = Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? fallbackTicks * tickDurationMs : fallbackTicks;
     }
 
-    return Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? tickDurationMs : this._lastTickDurationMs;
+    const derivedTicks = payloadRate > 0 && payload > 0 ? payload / payloadRate : null;
+    if (Number.isFinite(derivedTicks) && derivedTicks > 0) {
+      const derivedMs = Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? derivedTicks * tickDurationMs : derivedTicks;
+      if (!Number.isFinite(resolved) || resolved <= 0) {
+        resolved = derivedMs;
+      } else {
+        resolved = resolved * 0.7 + derivedMs * 0.3;
+      }
+    }
+
+    if (!Number.isFinite(resolved) || resolved <= 0) {
+      resolved = Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? tickDurationMs : this._lastTickDurationMs;
+    }
+
+    return resolved;
   }
 
   _resolvePulseStartSimMs(descriptor, tickDurationMs, referenceSimTime, durationMs) {
@@ -990,33 +1064,56 @@ export class BrainViewer {
       const y = segment.from.y + (segment.to.y - segment.from.y) * t;
       const appearance = pulse.appearance ?? {};
       const color = appearance.color ?? PARTICLE_COLOR;
-      const brightness = clamp(appearance.brightness ?? 1, 0.12, 2.4);
-      const size = Math.max(PARTICLE_MIN_SIZE, appearance.size ?? PARTICLE_BASE_SIZE);
+      const loadRatio = Number.isFinite(pulse.loadRatio) ? Math.max(0, pulse.loadRatio) : 0;
+      const rateRatio = Number.isFinite(pulse.rateRatio) ? Math.max(0, pulse.rateRatio) : 0;
+      const limitedLoad = Math.min(loadRatio, PULSE_VIEWER_MAX_LOAD_RATIO);
+      const limitedRate = Math.min(rateRatio, PULSE_VIEWER_MAX_RATE_RATIO);
+      const baseBrightness = clamp(appearance.brightness ?? 1, 0.12, 2.6);
+      const brightness = clamp(
+        baseBrightness * (1 + limitedRate * PARTICLE_RATE_BRIGHTNESS_MULTIPLIER + limitedLoad * 0.12),
+        0.12,
+        3,
+      );
+      const baseSize = Math.max(PARTICLE_MIN_SIZE, appearance.size ?? PARTICLE_BASE_SIZE);
+      const sizeBoostFactor = 1 + limitedLoad * PARTICLE_LOAD_SIZE_MULTIPLIER;
+      const sizeCap = PARTICLE_BASE_SIZE + PARTICLE_SIZE_RANGE * (1 + limitedLoad * 0.35);
+      const size = clamp(baseSize * sizeBoostFactor, PARTICLE_MIN_SIZE, sizeCap);
       const strength = clamp01(pulse.strength ?? 0.6);
       const defaultOpacity = clamp(
         PARTICLE_BASE_OPACITY + strength * PARTICLE_OPACITY_RANGE,
         PARTICLE_MIN_OPACITY,
         PARTICLE_MAX_OPACITY,
       );
-      const opacity = clamp(
-        (appearance.opacity ?? defaultOpacity) * brightness,
-        PARTICLE_MIN_OPACITY,
-        PARTICLE_MAX_OPACITY,
+      let opacity = appearance.opacity ?? defaultOpacity;
+      opacity = clamp(opacity * (1 + limitedLoad * PARTICLE_LOAD_OPACITY_MULTIPLIER), PARTICLE_MIN_OPACITY, PARTICLE_MAX_OPACITY);
+      opacity = clamp(opacity * brightness, PARTICLE_MIN_OPACITY, PARTICLE_MAX_OPACITY);
+      const baseGlowStrength = appearance.glowStrength ?? appearance.glow ?? 0;
+      const enhancedGlowStrength = clamp(
+        baseGlowStrength + limitedLoad * PARTICLE_LOAD_GLOW_MULTIPLIER + limitedRate * PARTICLE_RATE_GLOW_MULTIPLIER,
+        0,
+        3,
       );
-      const glowStrength = appearance.glowStrength ?? appearance.glow ?? 0;
       const glowOpacity = appearance.glowOpacity
-        ? clamp(appearance.glowOpacity * brightness, 0.05, 0.9)
-        : Math.min(0.78, opacity * (0.35 + glowStrength * 0.35));
-      const glowSize = Math.max(size * 1.6, appearance.glowSize ?? size * (2 + glowStrength));
+        ? clamp(appearance.glowOpacity * brightness, 0.05, 0.95)
+        : Math.min(0.85, opacity * (0.35 + enhancedGlowStrength * 0.35));
+      const glowSize = Math.max(
+        size * (1.8 + limitedLoad * 0.5),
+        appearance.glowSize ?? size * (2 + enhancedGlowStrength),
+      );
       ctx.save();
       if (appearance.trailColor && appearance.trailWidth) {
-        const trailFactor = 0.1;
+        const trailFactor = Math.min(0.18, 0.08 + limitedRate * 0.05);
         const trailT = Math.max(0, t - trailFactor);
         const trailX = segment.from.x + (segment.to.x - segment.from.x) * trailT;
         const trailY = segment.from.y + (segment.to.y - segment.from.y) * trailT;
         ctx.strokeStyle = appearance.trailColor;
-        ctx.lineWidth = clamp(appearance.trailWidth, 0.4, 3.2);
-        ctx.globalAlpha = Math.min(0.75, opacity * 0.9);
+        const trailWidth = clamp(
+          appearance.trailWidth * (1 + limitedRate * 0.65 + limitedLoad * 0.15),
+          0.4,
+          3.2,
+        );
+        ctx.lineWidth = trailWidth;
+        ctx.globalAlpha = Math.min(0.78, opacity * (0.85 + limitedRate * 0.1));
         ctx.beginPath();
         ctx.moveTo(trailX, trailY);
         ctx.lineTo(x, y);
