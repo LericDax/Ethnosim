@@ -49,7 +49,21 @@ export class HUD {
     this._applyRootStyles();
     this.host.appendChild(this.root);
 
-    this.inspector = new Inspector({ container: this.host });
+    this.inspector = new Inspector({
+      container: this.host,
+      onRequestClose: () => {
+        if (typeof this.scene.setSelectedAgent === 'function') {
+          this.scene.setSelectedAgent(null);
+        }
+        if (typeof this.scene.setSelectedHouse === 'function') {
+          this.scene.setSelectedHouse(null);
+        }
+        if (typeof this.scene.setSelectedCity === 'function') {
+          this.scene.setSelectedCity(null);
+        }
+        this._handleSceneSelectionChange({ type: null, id: null, data: null });
+      },
+    });
 
     this._latestAgentsById = new Map();
     this._latestHousesById = new Map();

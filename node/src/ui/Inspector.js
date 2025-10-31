@@ -92,7 +92,7 @@ function clamp01(value) {
 }
 
 export class Inspector {
-  constructor({ container = document.body } = {}) {
+  constructor({ container = document.body, onRequestClose = null } = {}) {
     this.container = container;
     this.agent = null;
     this.house = null;
@@ -100,10 +100,21 @@ export class Inspector {
     this.selection = { type: null, data: null };
     this._moodBars = new Map();
     this._temperamentBars = new Map();
+    this.onRequestClose = typeof onRequestClose === 'function' ? onRequestClose : null;
 
     this.root = document.createElement('div');
     this.root.className = 'hud-inspector';
     this._applyRootStyles();
+
+    this.headerEl = document.createElement('div');
+    Object.assign(this.headerEl.style, {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '12px',
+      marginBottom: '8px',
+    });
+    this.root.appendChild(this.headerEl);
 
     this.titleEl = document.createElement('div');
     this.titleEl.textContent = 'Agent Inspector';
@@ -112,9 +123,45 @@ export class Inspector {
       letterSpacing: '0.04em',
       textTransform: 'uppercase',
       color: PRIMARY_TEXT_COLOR,
-      marginBottom: '8px',
     });
-    this.root.appendChild(this.titleEl);
+    this.headerEl.appendChild(this.titleEl);
+
+    this.closeButton = document.createElement('button');
+    this.closeButton.type = 'button';
+    this.closeButton.textContent = 'Back';
+    Object.assign(this.closeButton.style, {
+      padding: '4px 10px',
+      borderRadius: '9999px',
+      border: `1px solid ${BORDER_COLOR}`,
+      background: 'rgba(15, 23, 42, 0.35)',
+      color: PRIMARY_TEXT_COLOR,
+      fontSize: '11px',
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontWeight: '600',
+      cursor: 'pointer',
+      transition: 'background 120ms ease-out, color 120ms ease-out',
+      display: 'none',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: 'inherit',
+    });
+    this.closeButton.addEventListener('mouseenter', () => {
+      if (this.closeButton.disabled) return;
+      this.closeButton.style.background = 'rgba(30, 41, 59, 0.65)';
+    });
+    this.closeButton.addEventListener('mouseleave', () => {
+      this.closeButton.style.background = 'rgba(15, 23, 42, 0.35)';
+    });
+    this.closeButton.addEventListener('click', () => {
+      if (typeof this.onRequestClose === 'function') {
+        this.onRequestClose(this.selection);
+      }
+      if (this.selection?.type) {
+        this.setSelection(null);
+      }
+    });
+    this.headerEl.appendChild(this.closeButton);
 
     this.placeholderEl = document.createElement('div');
     this.placeholderEl.textContent = 'Select an agent on the map or from the list to inspect their state.';
@@ -186,11 +233,17 @@ export class Inspector {
       }
       this.brainSection.root.style.display = 'none';
       this._configureSectionsForType(null);
+      if (this.closeButton) {
+        this.closeButton.style.display = 'none';
+      }
       return;
     }
 
     this.placeholderEl.style.display = 'none';
     this.bodyEl.style.display = 'flex';
+    if (this.closeButton) {
+      this.closeButton.style.display = 'inline-flex';
+    }
 
     if (type === 'agent') {
       this.titleEl.textContent = `Agent ${data.id ?? ''}`.trim();
