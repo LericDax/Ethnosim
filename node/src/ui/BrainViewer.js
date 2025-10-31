@@ -11,7 +11,6 @@ const NODE_HIGHLIGHT_STROKE = '#fde68a';
 const NODE_LABEL_COLOR = '#f8fafc';
 const NODE_LABEL_MUTED = 'rgba(226, 232, 240, 0.7)';
 const PARTICLE_COLOR = 'rgba(125, 211, 252, 0.82)';
-const PARTICLE_DECISION_COLOR = '#fef08a';
 const GRID_COLOR = 'rgba(15, 118, 110, 0.08)';
 const GRID_STEP = 14;
 
@@ -55,14 +54,21 @@ function computeDataSignature(data) {
   const pulsesPart = Array.isArray(data.pulses)
     ? data.pulses
         .map((pulse) =>
-          `${pulse?.edgeId ?? ''}:${Number(pulse?.progress ?? 0).toFixed(3)}:${Number(pulse?.strength ?? 0).toFixed(3)}`,
+          `${pulse?.id ?? pulse?.edgeId ?? ''}:${Number(pulse?.startedAt ?? pulse?.startedAtTick ?? 0).toFixed(3)}:${Number(
+            pulse?.strength ?? 0,
+          ).toFixed(3)}:${Number(pulse?.durationTicks ?? pulse?.duration ?? 0).toFixed(3)}`,
         )
         .sort()
         .join(';')
     : 'none';
-  const fillRatios = data.fillRatios && typeof data.fillRatios === 'object' ? data.fillRatios : null;
-  const fillPart = fillRatios
-    ? Object.entries(fillRatios)
+  const nodeFill =
+    data.nodeFill && typeof data.nodeFill === 'object'
+      ? data.nodeFill
+      : data.fillRatios && typeof data.fillRatios === 'object'
+        ? data.fillRatios
+        : null;
+  const fillPart = nodeFill
+    ? Object.entries(nodeFill)
         .map(([nodeId, value]) => `${nodeId}:${Number(value ?? 0).toFixed(3)}`)
         .sort()
         .join(';')
@@ -175,6 +181,7 @@ export class BrainViewer {
     this._edgeSegments = [];
     this._nodeDurations = new Map();
     this._nodeFillRatios = new Map();
+    this._nextFillNodeId = null;
     this._activePulses = [];
     this._pixelRatio = window.devicePixelRatio || 1;
     this._width = 0;
@@ -187,8 +194,11 @@ export class BrainViewer {
     this._decisionPulse = 0;
     this._transitionTiming = null;
     this._lastTickDurationMs = 500;
+    this._simulationTickDurationMs = this._lastTickDurationMs;
     this._isPaused = false;
-    this._pauseTimestamp = null;
+    this._snapshotPerfNow = null;
+    this._snapshotSimTimeMs = null;
+    this._pausedSimTimeMs = null;
 
     this._handleResize = this._handleResize.bind(this);
     this._renderFrame = this._renderFrame.bind(this);
@@ -223,19 +233,21 @@ export class BrainViewer {
     const transition = data?.transition ?? null;
     if (transition) {
       this._lastTickDurationMs = this._resolveTickDurationMs(transition);
+      this._simulationTickDurationMs = this._lastTickDurationMs;
     }
 
     const pulses = Array.isArray(data?.pulses) ? data.pulses : [];
-    const fillRatios = data && typeof data.fillRatios === 'object' ? data.fillRatios : null;
+    const fillRatios = this._extractFillRatios(data);
+    this._updateSimulationClock(transition);
     const signatureSource = data
-      ? { ...data, pulses, fillRatios: fillRatios ?? undefined }
+      ? { ...data, pulses, nodeFill: fillRatios ?? undefined }
       : data;
     const signature = computeDataSignature(signatureSource);
     if (signature === this._dataSignature) {
       this._transitionTiming = transition;
       this._applyFillRatios(fillRatios);
       this._updateDecisionState(data?.decision ?? null, transition);
-      this._ingestSnapshotPulses(pulses, transition);
+      this._updatePulsesFromDescriptors(pulses, transition);
       return;
     }
 
@@ -297,9 +309,9 @@ export class BrainViewer {
     this._applyFillRatios(fillRatios);
     this._needsLayout = true;
     this._needsRedraw = true;
-    this._transitionTiming = transition;
-    this._updateDecisionState(this._data.decision ?? null, transition, true);
-    this._ingestSnapshotPulses(pulses, transition);
+      this._transitionTiming = transition;
+      this._updateDecisionState(this._data.decision ?? null, transition);
+      this._updatePulsesFromDescriptors(pulses, transition);
 
     if (this._isPaused) {
       if (this._needsLayout) {
@@ -326,7 +338,7 @@ export class BrainViewer {
 
     this._isPaused = next;
     if (next) {
-      this._pauseTimestamp = typeof performance !== 'undefined' ? performance.now() : null;
+      this._pausedSimTimeMs = this._getCurrentSimTimeMs();
       this._stopAnimation();
       if (this._data) {
         if (this._needsLayout) {
@@ -337,14 +349,14 @@ export class BrainViewer {
       return;
     }
 
-    const resumeTime = typeof performance !== 'undefined' ? performance.now() : null;
-    if (resumeTime != null && this._pauseTimestamp != null) {
-      const pausedDuration = resumeTime - this._pauseTimestamp;
-      for (const pulse of this._activePulses) {
-        pulse.startedAt += pausedDuration;
-      }
+    const resumeNow = this._now();
+    if (this._pausedSimTimeMs != null) {
+      this._snapshotSimTimeMs = this._pausedSimTimeMs;
+      this._snapshotPerfNow = resumeNow;
+      this._pausedSimTimeMs = null;
+    } else {
+      this._snapshotPerfNow = resumeNow;
     }
-    this._pauseTimestamp = null;
     this._lastTimestamp = null;
     this._needsRedraw = true;
     if (this._data) {
@@ -362,8 +374,94 @@ export class BrainViewer {
     return numeric;
   }
 
+  _extractFillRatios(data) {
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+    const nodeFill = data.nodeFill && typeof data.nodeFill === 'object' ? data.nodeFill : null;
+    if (nodeFill) {
+      return nodeFill;
+    }
+    if (data.fillRatios && typeof data.fillRatios === 'object') {
+      return data.fillRatios;
+    }
+    return null;
+  }
+
+  _now() {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  _computeSimulationTimeFromTiming(timing, tickDurationMs) {
+    if (!timing) {
+      return null;
+    }
+
+    if (Number.isFinite(timing.currentTimeMs)) {
+      return timing.currentTimeMs;
+    }
+    if (Number.isFinite(timing.updatedAtMs)) {
+      return timing.updatedAtMs;
+    }
+
+    const safeTickMs = Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? tickDurationMs : null;
+
+    if (Number.isFinite(timing.updatedAtTick) && safeTickMs != null) {
+      return timing.updatedAtTick * safeTickMs;
+    }
+
+    if (Number.isFinite(timing.startedAtTick) && Number.isFinite(timing.elapsedTicks) && safeTickMs != null) {
+      return (timing.startedAtTick + timing.elapsedTicks) * safeTickMs;
+    }
+
+    if (Number.isFinite(timing.elapsedTicks) && safeTickMs != null) {
+      return timing.elapsedTicks * safeTickMs;
+    }
+
+    return null;
+  }
+
+  _updateSimulationClock(timing) {
+    const tickDurationMs = this._resolveTickDurationMs(timing);
+    this._simulationTickDurationMs = tickDurationMs;
+    const perfNow = this._now();
+    const simTime = this._computeSimulationTimeFromTiming(timing, tickDurationMs);
+    if (simTime != null) {
+      this._snapshotSimTimeMs = simTime;
+      this._snapshotPerfNow = perfNow;
+      if (this._isPaused) {
+        this._pausedSimTimeMs = simTime;
+      }
+      return;
+    }
+
+    if (this._snapshotPerfNow == null) {
+      this._snapshotPerfNow = perfNow;
+    }
+    if (this._snapshotSimTimeMs == null) {
+      this._snapshotSimTimeMs = perfNow;
+    }
+  }
+
+  _getCurrentSimTimeMs() {
+    if (this._isPaused && this._pausedSimTimeMs != null) {
+      return this._pausedSimTimeMs;
+    }
+    const perfNow = this._now();
+    if (this._snapshotPerfNow == null || this._snapshotSimTimeMs == null) {
+      this._snapshotPerfNow = perfNow;
+      this._snapshotSimTimeMs = perfNow;
+      return perfNow;
+    }
+    return this._snapshotSimTimeMs + (perfNow - this._snapshotPerfNow);
+  }
+
   _applyFillRatios(fillRatios) {
     this._nodeFillRatios.clear();
+    this._nextFillNodeId = null;
     if (!fillRatios || typeof fillRatios !== 'object') {
       return;
     }
@@ -373,6 +471,9 @@ export class BrainViewer {
     entries.sort((a, b) => b.value - a.value);
     for (const entry of entries) {
       this._nodeFillRatios.set(entry.nodeId, entry.value);
+    }
+    if (entries.length > 0) {
+      this._nextFillNodeId = entries[0].nodeId;
     }
   }
 
@@ -399,14 +500,14 @@ export class BrainViewer {
     return 1;
   }
 
-  _updateDecisionState(decision, timing = null, forcePulse = false) {
+  _updateDecisionState(decision, timing = null) {
     const edgeId = decision && decision.fromNodeId && decision.chosenNodeId
       ? `${decision.fromNodeId}->${decision.chosenNodeId}`
       : null;
     const key = decision
       ? `${edgeId ?? ''}|${(decision.candidates ?? []).length}`
       : 'none';
-    const isNewDecision = forcePulse || key !== this._decisionEdgeKey;
+    const isNewDecision = key !== this._decisionEdgeKey;
 
     if (timing) {
       this._lastTickDurationMs = this._resolveTickDurationMs(timing);
@@ -414,11 +515,6 @@ export class BrainViewer {
 
     if (isNewDecision) {
       this._decisionPulse = decision ? 1 : 0;
-      if (decision && edgeId) {
-        this._spawnPulse(edgeId, decision, timing);
-      }
-    } else if (decision && edgeId && timing) {
-      this._syncPulsesWithTiming(edgeId, timing);
     }
 
     this._decisionEdgeKey = key;
@@ -489,7 +585,7 @@ export class BrainViewer {
       this._rebuildLayout();
     }
 
-    this._advancePulses(timestamp);
+    this._advancePulses();
     this._decisionPulse = Math.max(0, this._decisionPulse - dt * 0.5);
 
     if (this._needsRedraw || dt > 0) {
@@ -541,173 +637,270 @@ export class BrainViewer {
     this._needsRedraw = true;
   }
 
-  _advancePulses(timestamp) {
+  _advancePulses() {
     if (!this._activePulses.length || !this._edgeSegments.length) {
       return;
     }
 
-    const now = timestamp ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const nowSim = this._getCurrentSimTimeMs();
     const segmentsById = new Map(this._edgeSegments.map((segment) => [segment.id, segment]));
-    const active = [];
     let changed = false;
+
     for (const pulse of this._activePulses) {
       const segment = segmentsById.get(pulse.edgeId);
       if (!segment) {
-        changed = true;
         continue;
       }
-      const durationMs = pulse.durationMs > 0 ? pulse.durationMs : this._lastTickDurationMs;
-      const elapsedMs = Math.max(0, now - pulse.startedAt);
-      const progress = durationMs > 0 ? Math.min(1, elapsedMs / durationMs) : 1;
+      const durationMs = Number.isFinite(pulse.durationMs) && pulse.durationMs > 0
+        ? pulse.durationMs
+        : this._simulationTickDurationMs;
+      const startedAt = Number.isFinite(pulse.startedAtSimMs)
+        ? pulse.startedAtSimMs
+        : Number.isFinite(this._snapshotSimTimeMs)
+          ? this._snapshotSimTimeMs
+          : nowSim;
+      const elapsedMs = Math.max(0, nowSim - startedAt);
+      const progress = durationMs > 0 ? Math.max(0, Math.min(1, elapsedMs / durationMs)) : 1;
       if (Math.abs(progress - (pulse.progress ?? 0)) > 0.001) {
         changed = true;
       }
       pulse.progress = progress;
       pulse.segment = segment;
-      if (progress < 1) {
-        active.push(pulse);
-      } else {
-        changed = true;
-      }
     }
+
     if (changed) {
       this._needsRedraw = true;
     }
-    this._activePulses = active;
   }
 
-  _ingestSnapshotPulses(pulses, timing) {
-    const decisionPulses = this._activePulses.filter((pulse) => pulse.kind === 'decision');
+  _updatePulsesFromDescriptors(pulses, timing) {
     if (!Array.isArray(pulses) || pulses.length === 0) {
-      this._activePulses = decisionPulses;
-      this._needsRedraw = true;
+      if (this._activePulses.length > 0) {
+        this._activePulses = [];
+        this._needsRedraw = true;
+      }
       return;
     }
 
-    const tickDurationMs = this._resolveTickDurationMs(timing);
-    const baseDurationMs = Math.max(tickDurationMs, tickDurationMs * 4);
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const tickDurationMs = this._resolveTickDurationMs(timing ?? this._transitionTiming);
+    const referenceSimTime = Number.isFinite(this._snapshotSimTimeMs)
+      ? this._snapshotSimTimeMs
+      : this._getCurrentSimTimeMs();
+    const existingById = new Map(this._activePulses.map((pulse) => [pulse.id, pulse]));
+    const nextPulses = [];
 
-    const snapshotPulses = pulses
-      .map((pulse, index) => {
-        const edgeId = pulse?.edgeId;
-        if (!edgeId) {
-          return null;
-        }
-        const progress = clamp01(Number(pulse.progress ?? 0));
-        const strength = clamp01(Number(pulse.strength ?? 0));
-        const durationMs = baseDurationMs;
-        const startedAt = durationMs > 0 ? now - progress * durationMs : now;
-        return {
-          id: `snapshot-${index}-${edgeId}`,
-          kind: 'snapshot',
-          edgeId,
-          fromNodeId: null,
-          toNodeId: null,
-          startedAt,
-          durationTicks: 1,
-          durationMs,
-          progress,
-          appearance: this._createSnapshotPulseAppearance(strength),
-          segment: null,
-          strength,
-        };
-      })
-      .filter(Boolean);
+    pulses.forEach((descriptor, index) => {
+      if (!descriptor || typeof descriptor !== 'object') {
+        return;
+      }
+      const edgeId = descriptor.edgeId ?? descriptor.edge ?? null;
+      if (!edgeId) {
+        return;
+      }
+      const id = this._resolvePulseId(descriptor, index);
+      if (!id) {
+        return;
+      }
+      const durationMs = this._resolvePulseDurationMs(descriptor, tickDurationMs, edgeId);
+      const startedAtSimMs = this._resolvePulseStartSimMs(
+        descriptor,
+        tickDurationMs,
+        referenceSimTime,
+        durationMs,
+      );
+      const strength = clamp01(Number(descriptor.strength ?? descriptor.intensity ?? 1));
+      const appearance = this._createSnapshotPulseAppearance(strength, descriptor);
+      const pulse = existingById.get(id) ?? { id, progress: 0 };
+      pulse.id = id;
+      pulse.edgeId = edgeId;
+      pulse.durationMs = durationMs;
+      pulse.startedAtSimMs = startedAtSimMs;
+      pulse.strength = strength;
+      pulse.appearance = appearance;
+      pulse.segment = null;
+      pulse.descriptor = descriptor;
+      nextPulses.push(pulse);
+    });
 
-    this._activePulses = decisionPulses.concat(snapshotPulses);
+    this._activePulses = nextPulses;
     this._needsRedraw = true;
   }
 
-  _createPulseAppearance(kind) {
-    if (kind === 'decision') {
-      return {
-        color: PARTICLE_DECISION_COLOR,
-        opacity: 0.95,
-        size: 3.6,
-        trailColor: 'rgba(56, 189, 248, 0.45)',
-        trailWidth: 1.4,
-        glowColor: 'rgba(56, 189, 248, 0.28)',
-        glowSize: 9,
-      };
+  _resolvePulseId(descriptor, index) {
+    if (!descriptor || typeof descriptor !== 'object') {
+      return null;
     }
-    return {
-      color: PARTICLE_COLOR,
-      opacity: 0.78,
-      size: 2.6,
-    };
-  }
-
-  _createSnapshotPulseAppearance(strength) {
-    const ratio = clamp01(Number(strength));
-    return {
-      color: PARTICLE_COLOR,
-      opacity: 0.45 + ratio * 0.35,
-      size: 2.1 + ratio * 2.6,
-    };
-  }
-
-  _spawnPulse(edgeId, decision, timing) {
+    if (descriptor.id != null) {
+      return String(descriptor.id);
+    }
+    const edgeId = descriptor.edgeId ?? descriptor.edge ?? null;
     if (!edgeId) {
-      return;
+      return null;
     }
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const toNodeId = decision?.chosenNodeId ?? null;
-    const durationTicks = timing && Number.isFinite(timing.durationTicks) && timing.durationTicks > 0
-      ? timing.durationTicks
-      : this._resolveNodeDuration(toNodeId);
-    const tickDurationMs = this._resolveTickDurationMs(timing);
-    const pulse = {
-      id: `${now}-${Math.random().toString(16).slice(2)}`,
-      kind: 'decision',
-      edgeId,
-      fromNodeId: decision?.fromNodeId ?? null,
-      toNodeId,
-      startedAt: now,
-      durationTicks,
-      durationMs: Math.max(tickDurationMs, durationTicks * tickDurationMs),
-      progress: 0,
-      appearance: this._createPulseAppearance('decision'),
-      segment: null,
-    };
-    if (timing) {
-      this._syncPulseWithTiming(pulse, timing, now);
+    if (descriptor.uid != null) {
+      return `${edgeId}|${descriptor.uid}`;
     }
-    this._activePulses.push(pulse);
-    this._needsRedraw = true;
+    const startedAt = descriptor.startedAt ?? descriptor.startedAtMs ?? descriptor.startedAtTick;
+    if (startedAt != null) {
+      return `${edgeId}|${startedAt}`;
+    }
+    if (descriptor.started_at_tick != null) {
+      return `${edgeId}|${descriptor.started_at_tick}`;
+    }
+    return `${edgeId}|${index}`;
   }
 
-  _syncPulseWithTiming(pulse, timing, now = typeof performance !== 'undefined' ? performance.now() : Date.now()) {
-    if (!timing) {
-      return;
+  _parseEdgeTarget(edgeId) {
+    if (typeof edgeId !== 'string') {
+      return null;
     }
-    const tickDurationMs = this._resolveTickDurationMs(timing);
-    const durationTicks = timing && Number.isFinite(timing.durationTicks) && timing.durationTicks > 0
-      ? timing.durationTicks
-      : pulse.durationTicks ?? this._resolveNodeDuration(pulse.toNodeId);
-    const safeDurationTicks = Math.max(1, durationTicks);
-    const remainingTicks = timing && Number.isFinite(timing.remainingTicks)
-      ? Math.max(0, Math.min(safeDurationTicks, timing.remainingTicks))
-      : Math.max(0, safeDurationTicks - (timing.elapsedTicks ?? 0));
-    const elapsedTicks = Math.max(0, Math.min(safeDurationTicks, safeDurationTicks - remainingTicks));
-    pulse.durationTicks = safeDurationTicks;
-    pulse.durationMs = Math.max(tickDurationMs, safeDurationTicks * tickDurationMs);
-    const elapsedMs = Math.min(pulse.durationMs, elapsedTicks * tickDurationMs);
-    pulse.startedAt = now - elapsedMs;
-    pulse.progress = pulse.durationMs > 0 ? Math.min(1, elapsedMs / pulse.durationMs) : 1;
+    const parts = edgeId.split('->');
+    if (parts.length === 2 && parts[1]) {
+      return parts[1];
+    }
+    return null;
   }
 
-  _syncPulsesWithTiming(edgeId, timing) {
-    if (!edgeId || !timing) {
-      return;
-    }
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    for (const pulse of this._activePulses) {
-      if (pulse.edgeId === edgeId && pulse.kind !== 'snapshot') {
-        this._syncPulseWithTiming(pulse, timing, now);
+  _resolvePulseDurationMs(descriptor, tickDurationMs, edgeId) {
+    const durationCandidates = [
+      descriptor.durationMs,
+      descriptor.duration_ms,
+      descriptor.durationMilliseconds,
+      descriptor.duration,
+    ];
+    for (const candidate of durationCandidates) {
+      const numeric = Number(candidate);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric;
       }
     }
-    this._needsRedraw = true;
+
+    const tickCandidates = [descriptor.durationTicks, descriptor.duration_ticks, descriptor.ticks];
+    for (const candidate of tickCandidates) {
+      const numeric = Number(candidate);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        if (Number.isFinite(tickDurationMs) && tickDurationMs > 0) {
+          return numeric * tickDurationMs;
+        }
+        return numeric;
+      }
+    }
+
+    const toNodeId = this._parseEdgeTarget(edgeId);
+    const fallbackTicks = this._resolveNodeDuration(toNodeId);
+    if (Number.isFinite(fallbackTicks) && fallbackTicks > 0 && Number.isFinite(tickDurationMs) && tickDurationMs > 0) {
+      return fallbackTicks * tickDurationMs;
+    }
+
+    return Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? tickDurationMs : this._lastTickDurationMs;
+  }
+
+  _resolvePulseStartSimMs(descriptor, tickDurationMs, referenceSimTime, durationMs) {
+    const msKeys = [
+      'startedAtMs',
+      'started_at_ms',
+      'startedAtMilliseconds',
+      'startedAt',
+    ];
+    for (const key of msKeys) {
+      if (descriptor[key] == null) {
+        continue;
+      }
+      const numeric = Number(descriptor[key]);
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+    }
+
+    const secondKeys = ['startedAtSeconds', 'started_at_seconds'];
+    for (const key of secondKeys) {
+      if (descriptor[key] == null) {
+        continue;
+      }
+      const numeric = Number(descriptor[key]);
+      if (Number.isFinite(numeric)) {
+        return numeric * 1000;
+      }
+    }
+
+    const tickKeys = ['startedAtTick', 'started_at_tick'];
+    for (const key of tickKeys) {
+      if (descriptor[key] == null) {
+        continue;
+      }
+      const numeric = Number(descriptor[key]);
+      if (Number.isFinite(numeric)) {
+        if (Number.isFinite(tickDurationMs) && tickDurationMs > 0) {
+          return numeric * tickDurationMs;
+        }
+        return numeric;
+      }
+    }
+
+    const elapsedMsKeys = ['elapsedMs', 'elapsedMilliseconds'];
+    for (const key of elapsedMsKeys) {
+      if (descriptor[key] == null) {
+        continue;
+      }
+      const numeric = Number(descriptor[key]);
+      if (Number.isFinite(numeric) && Number.isFinite(referenceSimTime)) {
+        return referenceSimTime - numeric;
+      }
+    }
+
+    const elapsedTickKeys = ['elapsedTicks', 'elapsed_ticks'];
+    for (const key of elapsedTickKeys) {
+      if (descriptor[key] == null) {
+        continue;
+      }
+      const numeric = Number(descriptor[key]);
+      if (Number.isFinite(numeric) && Number.isFinite(referenceSimTime)) {
+        const elapsedMs = Number.isFinite(tickDurationMs) && tickDurationMs > 0 ? numeric * tickDurationMs : numeric;
+        return referenceSimTime - elapsedMs;
+      }
+    }
+
+    const progress = Number(descriptor.progress);
+    if (Number.isFinite(progress) && durationMs > 0 && Number.isFinite(referenceSimTime)) {
+      const clamped = clamp01(progress);
+      return referenceSimTime - clamped * durationMs;
+    }
+
+    return Number.isFinite(referenceSimTime) ? referenceSimTime : this._getCurrentSimTimeMs();
+  }
+
+  _createSnapshotPulseAppearance(strength, descriptor = null) {
+    if (descriptor && typeof descriptor.appearance === 'object') {
+      const appearance = { ...descriptor.appearance };
+      if (appearance.color == null) {
+        appearance.color = descriptor.color ?? PARTICLE_COLOR;
+      }
+      if (appearance.opacity == null) {
+        appearance.opacity = 0.45 + clamp01(Number(strength)) * 0.35;
+      }
+      if (appearance.size == null) {
+        appearance.size = 2.1 + clamp01(Number(strength)) * 2.6;
+      }
+      return appearance;
+    }
+
+    const ratio = clamp01(Number(strength));
+    const appearance = {
+      color: descriptor?.color ?? PARTICLE_COLOR,
+      opacity: descriptor?.opacity != null ? descriptor.opacity : 0.45 + ratio * 0.35,
+      size: descriptor?.size != null ? descriptor.size : 2.1 + ratio * 2.6,
+    };
+
+    if (descriptor?.trailColor) {
+      appearance.trailColor = descriptor.trailColor;
+      appearance.trailWidth = descriptor.trailWidth ?? 1.4;
+    }
+    if (descriptor?.glowColor) {
+      appearance.glowColor = descriptor.glowColor;
+      appearance.glowSize = descriptor.glowSize ?? 8;
+    }
+
+    return appearance;
   }
 
   _drawPulses(ctx) {
@@ -870,26 +1063,30 @@ export class BrainViewer {
       ctx.globalAlpha = isCurrent ? 0.95 : 0.9;
       ctx.fill();
       if (fillRatio > 0) {
-        const wedgeRadius = Math.max(2, radius - 2);
+        const wedgeRadius = Math.max(3, radius - 1);
+        const startAngle = -Math.PI / 2;
+        const endAngle = startAngle + fillRatio * Math.PI * 2;
         ctx.beginPath();
-        ctx.moveTo(position.x, position.y);
-        ctx.arc(
-          position.x,
-          position.y,
-          wedgeRadius,
-          -Math.PI / 2,
-          -Math.PI / 2 + fillRatio * Math.PI * 2,
-          false,
-        );
-        ctx.closePath();
-        ctx.fillStyle = isCurrent ? 'rgba(250, 204, 21, 0.6)' : 'rgba(56, 189, 248, 0.55)';
-        ctx.globalAlpha = 0.45 + fillRatio * 0.45;
-        ctx.fill();
+        ctx.strokeStyle = isCurrent ? 'rgba(250, 204, 21, 0.75)' : 'rgba(56, 189, 248, 0.65)';
+        ctx.lineWidth = isCurrent ? 3 : 2.6;
+        ctx.globalAlpha = 0.6 + fillRatio * 0.3;
+        ctx.arc(position.x, position.y, wedgeRadius, startAngle, endAngle, false);
+        ctx.stroke();
       }
       ctx.lineWidth = isCurrent ? 2 : 1.5;
       ctx.strokeStyle = isCurrent ? NODE_HIGHLIGHT_STROKE : NODE_STROKE;
       ctx.globalAlpha = 1;
       ctx.stroke();
+      if (!isCurrent && this._nextFillNodeId === node.id && fillRatio > 0) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+        ctx.lineWidth = 6;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.arc(position.x, position.y, radius + 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
       if (isCurrent) {
         ctx.fillStyle = 'rgba(250, 204, 21, 0.35)';
         ctx.beginPath();
