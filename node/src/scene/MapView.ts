@@ -361,6 +361,19 @@ export class MapView {
     return this.gridVisible;
   }
 
+  /** Read the current world dimensions used for rendering. */
+  getWorldDimensions(): { width: number; height: number } {
+    return { width: this.worldWidth, height: this.worldHeight };
+  }
+
+  /** Compute integer coordinates at the approximate center of the world. */
+  getWorldCenter(): { x: number; y: number } {
+    const { width, height } = this.getWorldDimensions();
+    const centerX = Math.max(0, Math.floor(width / 2));
+    const centerY = Math.max(0, Math.floor(height / 2));
+    return { x: centerX, y: centerY };
+  }
+
   /** Forward compatibility with HUD agent selection controls. */
   setSelectedAgent(agentId: string | null) {
     const id = agentId ?? null;
