@@ -12,7 +12,7 @@ import {
 } from './engine/brain.ts';
 import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
 import { createWorld, type WorldState } from './engine/world.ts';
-import { handleReproduction } from './engine/repro.ts';
+import { handleReproduction, matchReproductivePartners } from './engine/repro.ts';
 import { createTraitProfile } from './engine/traits.ts';
 import {
   assignAgentsToHouses,
@@ -38,6 +38,7 @@ import {
   type ChromosomeRegistry,
 } from './engine/chromosomes.ts';
 import { resolveScenario, scenarioToSimulationDefaults } from './data/scenarios.ts';
+import type { ReproductiveGroup } from './engine/repro.ts';
 
 export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
@@ -71,6 +72,8 @@ export interface AgentState extends MovableAgent, HouseAssignableAgent {
   fertility: number;
   pregnancy: PregnancyState | null;
   bondPartnerId: string | null;
+  reproductiveGroupId: string | null;
+  reproductiveGroupRole: string | null;
   parents: string[];
   temperament: Temperament;
   traitFlags: string[];
@@ -95,6 +98,8 @@ export interface SimulationState {
   rng: SimulationRng;
   stageCounts: StageCounts;
   nextAgentId: number;
+  reproductiveGroups: ReproductiveGroup[];
+  nextReproductiveGroupId: number;
   scenarioId: string;
   seed: string;
   chromosomeRegistry: ChromosomeRegistry;
@@ -144,7 +149,20 @@ interface SnapshotAgent {
   reproductiveRoles: AgentState['reproductiveRoles'];
   genderIdentity: AgentState['genderIdentity'];
   bondPartnerId: string | null;
+  reproductiveGroupId: string | null;
+  reproductiveGroupRole: string | null;
   parents: string[];
+}
+
+interface SnapshotReproductiveGroupMember {
+  agentId: string;
+  role: string;
+}
+
+interface SnapshotReproductiveGroup {
+  id: string;
+  formedAtTick: number;
+  members: SnapshotReproductiveGroupMember[];
 }
 
 interface SnapshotHouse {
@@ -202,6 +220,7 @@ export interface Snapshot {
   decisions: SnapshotDecision[];
   stats: StageCounts;
   chromosomes: ChromosomeRegistry;
+  reproductiveGroups: SnapshotReproductiveGroup[];
 }
 
 interface WorkerInitMessage {
@@ -495,7 +514,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   });
   const stageCounts = computeStageCounts(agents);
 
-  return {
+  const simulation: SimulationState = {
     tick: 0,
     world,
     agents,
@@ -510,10 +529,16 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     },
     stageCounts,
     nextAgentId: agents.length,
+    reproductiveGroups: [],
+    nextReproductiveGroupId: 0,
     scenarioId,
     seed: seedString,
     chromosomeRegistry,
   };
+
+  matchReproductivePartners(simulation);
+
+  return simulation;
 }
 
 function createAgents(
@@ -571,6 +596,8 @@ function createAgents(
       fertility,
       pregnancy: null,
       bondPartnerId: null,
+      reproductiveGroupId: null,
+      reproductiveGroupRole: null,
       parents: [],
       temperament,
       traitFlags: [...traitProfile.traitFlags],
@@ -591,23 +618,6 @@ function createAgents(
       }
     }
   });
-
-  const gestators = adults.filter((agent) => agent.reproductiveRoles.includes('gestator'));
-  const fertilizers = adults.filter((agent) => agent.reproductiveRoles.includes('fertilizer'));
-  shuffleInPlace(gestators, stream);
-  shuffleInPlace(fertilizers, stream);
-  const pairedFertilizers = new Set<string>();
-  for (const gestator of gestators) {
-    const partner = fertilizers.find(
-      (candidate) => candidate.id !== gestator.id && !pairedFertilizers.has(candidate.id),
-    );
-    if (!partner) {
-      continue;
-    }
-    gestator.bondPartnerId = partner.id;
-    partner.bondPartnerId = gestator.id;
-    pairedFertilizers.add(partner.id);
-  }
 
   return agents;
 }
@@ -690,6 +700,7 @@ function clamp01(value: number): number {
 export function stepSimulationState(simulation: SimulationState): void {
   simulation.tick += 1;
 
+  matchReproductivePartners(simulation);
   handleReproduction(simulation);
 
   assignAgentsToHouses(simulation.houses, simulation.agents);
@@ -742,7 +753,9 @@ export function stepSimulationState(simulation: SimulationState): void {
     moveAgent(agent, movementContext, simulation.rng.tick);
   });
 
-  stepAging(simulation);
+  stepAging(simulation, {
+    onEnterAdulthood: () => matchReproductivePartners(simulation),
+  });
 
   simulation.stageCounts = computeStageCounts(simulation.agents);
 }
@@ -774,6 +787,9 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
     decisions: createSnapshotDecisions(simulation),
     stats: { ...simulation.stageCounts },
     chromosomes: cloneChromosomeRegistry(simulation.chromosomeRegistry),
+    reproductiveGroups: simulation.reproductiveGroups.map((group) =>
+      createSnapshotReproductiveGroup(group),
+    ),
   };
 }
 
@@ -799,7 +815,17 @@ function createSnapshotAgent(agent: AgentState): SnapshotAgent {
     reproductiveRoles: [...agent.reproductiveRoles],
     genderIdentity: agent.genderIdentity,
     bondPartnerId: agent.bondPartnerId,
+    reproductiveGroupId: agent.reproductiveGroupId,
+    reproductiveGroupRole: agent.reproductiveGroupRole,
     parents: [...agent.parents],
+  };
+}
+
+function createSnapshotReproductiveGroup(group: ReproductiveGroup): SnapshotReproductiveGroup {
+  return {
+    id: group.id,
+    formedAtTick: group.formedAtTick,
+    members: group.members.map((member) => ({ agentId: member.agentId, role: member.role })),
   };
 }
 

@@ -9,6 +9,155 @@ import { sampleChromosomes } from './chromosomes.ts';
 const CONCEPTION_RATE_MULTIPLIER = 0.02;
 export const GESTATION_TICKS = 200;
 
+export interface ReproductiveGroupMember {
+  agentId: string;
+  role: string;
+}
+
+export interface ReproductiveGroup {
+  id: string;
+  formedAtTick: number;
+  members: ReproductiveGroupMember[];
+}
+
+export function matchReproductivePartners(simulation: SimulationState): void {
+  const agentsById = new Map<string, AgentState>();
+  for (const agent of simulation.agents) {
+    agentsById.set(agent.id, agent);
+  }
+
+  const assignedAgents = new Set<string>();
+  const updatedGroups: ReproductiveGroup[] = [];
+
+  for (const group of simulation.reproductiveGroups) {
+    const members: ReproductiveGroupMember[] = [];
+    for (const member of group.members) {
+      const agent = agentsById.get(member.agentId);
+      if (!agent || !isMemberCompatible(agent, member.role)) {
+        if (agent) {
+          clearAgentReproductiveAssignment(agent);
+        }
+        continue;
+      }
+      assignAgentToGroup(agent, group.id, member.role);
+      members.push({ agentId: agent.id, role: member.role });
+      assignedAgents.add(agent.id);
+    }
+
+    if (!groupHasRequiredRoles(members)) {
+      for (const member of members) {
+        const agent = agentsById.get(member.agentId);
+        if (agent) {
+          clearAgentReproductiveAssignment(agent);
+        }
+      }
+      continue;
+    }
+
+    const normalizedGroup: ReproductiveGroup = {
+      id: group.id,
+      formedAtTick: group.formedAtTick,
+      members,
+    };
+    updatedGroups.push(normalizedGroup);
+    updateGroupBondReferences(normalizedGroup, agentsById);
+  }
+
+  const availableGestators: AgentState[] = [];
+  const availableFertilizers: AgentState[] = [];
+
+  for (const agent of simulation.agents) {
+    if (assignedAgents.has(agent.id)) {
+      continue;
+    }
+    if (agent.lifeStage !== 'adult') {
+      continue;
+    }
+    if (agent.reproductiveRoles.includes('gestator') && !agent.pregnancy && agent.fertility > 0) {
+      availableGestators.push(agent);
+    }
+    if (agent.reproductiveRoles.includes('fertilizer')) {
+      availableFertilizers.push(agent);
+    }
+  }
+
+  shuffleInPlace(availableGestators, simulation.rng.tick);
+  shuffleInPlace(availableFertilizers, simulation.rng.tick);
+
+  const usedFertilizers = new Set<string>();
+  for (const gestator of availableGestators) {
+    const partner = availableFertilizers.find(
+      (candidate) => candidate.id !== gestator.id && !usedFertilizers.has(candidate.id),
+    );
+    if (!partner) {
+      continue;
+    }
+
+    const groupId = `rg-${simulation.nextReproductiveGroupId}`;
+    simulation.nextReproductiveGroupId += 1;
+
+    const newGroup: ReproductiveGroup = {
+      id: groupId,
+      formedAtTick: simulation.tick,
+      members: [
+        { agentId: gestator.id, role: 'gestator' },
+        { agentId: partner.id, role: 'fertilizer' },
+      ],
+    };
+
+    assignAgentToGroup(gestator, newGroup.id, 'gestator');
+    assignAgentToGroup(partner, newGroup.id, 'fertilizer');
+    assignedAgents.add(gestator.id);
+    assignedAgents.add(partner.id);
+    usedFertilizers.add(partner.id);
+
+    updatedGroups.push(newGroup);
+    updateGroupBondReferences(newGroup, agentsById);
+  }
+
+  simulation.reproductiveGroups = updatedGroups;
+}
+
+export function releaseAgentFromReproductiveGroups(
+  simulation: SimulationState,
+  agentId: string,
+): void {
+  if (simulation.reproductiveGroups.length === 0) {
+    return;
+  }
+
+  const agentsById = new Map<string, AgentState>();
+  for (const agent of simulation.agents) {
+    agentsById.set(agent.id, agent);
+  }
+
+  let wasMember = false;
+  const remainingGroups: ReproductiveGroup[] = [];
+
+  for (const group of simulation.reproductiveGroups) {
+    const contains = group.members.some((member) => member.agentId === agentId);
+    if (!contains) {
+      remainingGroups.push(group);
+      continue;
+    }
+
+    wasMember = true;
+    for (const member of group.members) {
+      const agent = agentsById.get(member.agentId);
+      if (agent) {
+        clearAgentReproductiveAssignment(agent);
+      }
+    }
+  }
+
+  if (!wasMember) {
+    return;
+  }
+
+  simulation.reproductiveGroups = remainingGroups;
+  matchReproductivePartners(simulation);
+}
+
 export function handleReproduction(simulation: SimulationState): void {
   const rng = simulation.rng.tick;
   const agentsById = new Map<string, AgentState>();
@@ -19,19 +168,28 @@ export function handleReproduction(simulation: SimulationState): void {
   const newborns: AgentState[] = [];
   const newPregnancies = new Set<string>();
 
+  const groupsById = new Map<string, ReproductiveGroup>();
+  for (const group of simulation.reproductiveGroups) {
+    groupsById.set(group.id, group);
+  }
+
   for (const agent of simulation.agents) {
     if (
       agent.lifeStage !== 'adult' ||
       !agent.reproductiveRoles.includes('gestator') ||
       agent.fertility <= 0 ||
-      agent.pregnancy ||
-      !agent.bondPartnerId
+      agent.pregnancy
     ) {
       continue;
     }
 
-    const partner = agentsById.get(agent.bondPartnerId);
-    if (!partner || !partner.reproductiveRoles.includes('fertilizer')) {
+    const group = agent.reproductiveGroupId ? groupsById.get(agent.reproductiveGroupId) : null;
+    if (!group) {
+      continue;
+    }
+
+    const partner = getFirstPartnerForRole(group, agent.id, 'fertilizer', agentsById);
+    if (!partner) {
       continue;
     }
 
@@ -148,6 +306,8 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     fertility: 0,
     pregnancy: null,
     bondPartnerId: null,
+    reproductiveGroupId: null,
+    reproductiveGroupRole: null,
     parents,
     temperament,
     traitFlags: [...traitProfile.traitFlags],
@@ -176,4 +336,97 @@ function buildInitialMoodStateFromProfile(
     return {};
   }
   return { ...profile.moodLevels };
+}
+
+function isMemberCompatible(agent: AgentState, role: string): boolean {
+  if (agent.lifeStage !== 'adult') {
+    return false;
+  }
+  return agent.reproductiveRoles.includes(role);
+}
+
+function groupHasRequiredRoles(members: ReproductiveGroupMember[]): boolean {
+  if (members.length < 2) {
+    return false;
+  }
+  let hasGestator = false;
+  let hasFertilizer = false;
+  for (const member of members) {
+    if (member.role === 'gestator') {
+      hasGestator = true;
+    } else if (member.role === 'fertilizer') {
+      hasFertilizer = true;
+    }
+  }
+  return hasGestator && hasFertilizer;
+}
+
+function assignAgentToGroup(agent: AgentState, groupId: string, role: string): void {
+  agent.reproductiveGroupId = groupId;
+  agent.reproductiveGroupRole = role;
+}
+
+function clearAgentReproductiveAssignment(agent: AgentState): void {
+  agent.reproductiveGroupId = null;
+  agent.reproductiveGroupRole = null;
+  agent.bondPartnerId = null;
+}
+
+function updateGroupBondReferences(
+  group: ReproductiveGroup,
+  agentsById: Map<string, AgentState>,
+): void {
+  const gestators: AgentState[] = [];
+  const fertilizers: AgentState[] = [];
+  for (const member of group.members) {
+    const agent = agentsById.get(member.agentId);
+    if (!agent) {
+      continue;
+    }
+    if (member.role === 'gestator') {
+      gestators.push(agent);
+    } else if (member.role === 'fertilizer') {
+      fertilizers.push(agent);
+    }
+  }
+
+  const primaryGestator = gestators[0] ?? null;
+  const primaryFertilizer = fertilizers[0] ?? null;
+
+  for (const gestator of gestators) {
+    gestator.bondPartnerId = primaryFertilizer ? primaryFertilizer.id : null;
+  }
+  for (const fertilizer of fertilizers) {
+    fertilizer.bondPartnerId = primaryGestator ? primaryGestator.id : null;
+  }
+}
+
+function getFirstPartnerForRole(
+  group: ReproductiveGroup,
+  agentId: string,
+  desiredRole: string,
+  agentsById: Map<string, AgentState>,
+): AgentState | null {
+  for (const member of group.members) {
+    if (member.role !== desiredRole) {
+      continue;
+    }
+    if (member.agentId === agentId) {
+      continue;
+    }
+    const partner = agentsById.get(member.agentId);
+    if (partner) {
+      return partner;
+    }
+  }
+  return null;
+}
+
+function shuffleInPlace<T>(array: T[], rng: RngStream): void {
+  for (let i = array.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng.nextFloat() * (i + 1));
+    const temp = array[i];
+    array[i] = array[j];
+    array[j] = temp;
+  }
 }
