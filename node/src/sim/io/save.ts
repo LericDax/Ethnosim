@@ -37,11 +37,19 @@ export interface SerializedAgentState {
   fertility: number;
   pregnancy: PregnancyState | null;
   bondPartnerId: string | null;
+  reproductiveGroupId: string | null;
+  reproductiveGroupRole: string | null;
   parents: string[];
   temperament: AgentState['temperament'];
   traitFlags: string[];
   moods: Record<string, number>;
   houseId: string | null;
+}
+
+export interface SerializedReproductiveGroup {
+  id: string;
+  formedAtTick: number;
+  members: { agentId: string; role: string }[];
 }
 
 export interface SerializedHouseState {
@@ -105,6 +113,8 @@ export interface SerializedSimulationState {
   rng: SerializedSimulationRng;
   stageCounts: SimulationState['stageCounts'];
   nextAgentId: number;
+  reproductiveGroups: SerializedReproductiveGroup[];
+  nextReproductiveGroupId: number;
   chromosomes: ChromosomeRegistry;
 }
 
@@ -130,6 +140,8 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     rng: serializeRng(state),
     stageCounts: { ...state.stageCounts },
     nextAgentId: state.nextAgentId,
+    reproductiveGroups: state.reproductiveGroups.map((group) => serializeReproductiveGroup(group)),
+    nextReproductiveGroupId: state.nextReproductiveGroupId,
     chromosomes: cloneChromosomeRegistry(state.chromosomeRegistry),
   };
 }
@@ -188,11 +200,21 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     fertility: agent.fertility,
     pregnancy: agent.pregnancy ? { ...agent.pregnancy, fetusTemperament: { ...agent.pregnancy.fetusTemperament } } : null,
     bondPartnerId: agent.bondPartnerId,
+    reproductiveGroupId: agent.reproductiveGroupId,
+    reproductiveGroupRole: agent.reproductiveGroupRole,
     parents: [...agent.parents],
     temperament: { ...agent.temperament },
     traitFlags: [...agent.traitFlags],
     moods: { ...agent.moods },
     houseId: agent.houseId ?? null,
+  };
+}
+
+function serializeReproductiveGroup(group: SimulationState['reproductiveGroups'][number]): SerializedReproductiveGroup {
+  return {
+    id: group.id,
+    formedAtTick: group.formedAtTick,
+    members: group.members.map((member) => ({ agentId: member.agentId, role: member.role })),
   };
 }
 

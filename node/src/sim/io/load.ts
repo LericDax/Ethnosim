@@ -18,7 +18,10 @@ import {
   type SerializedHouseState,
   type SerializedSimulationState,
   type SerializedWorldState,
+  type SerializedReproductiveGroup,
 } from './save.ts';
+import { matchReproductivePartners } from '../engine/repro.ts';
+import type { ReproductiveGroup } from '../engine/repro.ts';
 
 export async function loadSimulationState(id: string): Promise<SimulationState | null> {
   const db = await openDatabase();
@@ -53,8 +56,14 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
   const chromosomeRegistry = registrySource
     ? cloneChromosomeRegistry(registrySource)
     : buildChromosomeRegistry(null);
+  const reproductiveGroups = (serialized as Partial<SerializedSimulationState>).reproductiveGroups
+    ? serialized.reproductiveGroups.map((group) => restoreReproductiveGroup(group))
+    : [];
+  const nextReproductiveGroupId =
+    (serialized as Partial<SerializedSimulationState>).nextReproductiveGroupId ??
+    inferNextReproductiveGroupId(reproductiveGroups);
 
-  return {
+  const simulation: SimulationState = {
     tick: serialized.tick,
     world,
     agents,
@@ -69,10 +78,16 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
     },
     stageCounts: { ...serialized.stageCounts },
     nextAgentId: serialized.nextAgentId,
+    reproductiveGroups,
+    nextReproductiveGroupId,
     scenarioId: serialized.scenarioId,
     seed: serialized.seed,
     chromosomeRegistry,
   };
+
+  matchReproductivePartners(simulation);
+
+  return simulation;
 }
 
 function restoreWorld(serialized: SerializedWorldState): WorldState {
@@ -132,12 +147,37 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
       ? { ...serialized.pregnancy, fetusTemperament: { ...serialized.pregnancy.fetusTemperament } }
       : null,
     bondPartnerId: serialized.bondPartnerId,
+    reproductiveGroupId: serialized.reproductiveGroupId ?? null,
+    reproductiveGroupRole: serialized.reproductiveGroupRole ?? null,
     parents: [...serialized.parents],
     temperament: { ...serialized.temperament },
     traitFlags: [...serialized.traitFlags],
     moods: { ...serialized.moods },
     houseId: serialized.houseId,
   };
+}
+
+function restoreReproductiveGroup(serialized: SerializedReproductiveGroup): ReproductiveGroup {
+  return {
+    id: serialized.id,
+    formedAtTick: serialized.formedAtTick ?? 0,
+    members: serialized.members.map((member) => ({ agentId: member.agentId, role: member.role })),
+  };
+}
+
+function inferNextReproductiveGroupId(groups: ReproductiveGroup[]): number {
+  let max = -1;
+  for (const group of groups) {
+    const match = /^(?:.*?)(\d+)$/.exec(group.id);
+    if (!match) {
+      continue;
+    }
+    const value = Number.parseInt(match[1], 10);
+    if (Number.isFinite(value) && value > max) {
+      max = value;
+    }
+  }
+  return max + 1;
 }
 
 function restoreHouse(serialized: SerializedHouseState): HouseState {

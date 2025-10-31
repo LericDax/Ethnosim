@@ -30,7 +30,11 @@ const NEXT_STAGE: Record<LifeStage, LifeStage | null> = {
   adult: null,
 };
 
-export function stepAging(simulation: SimulationState): void {
+export interface AgingHooks {
+  onEnterAdulthood?: (agent: AgentState, simulation: SimulationState) => void;
+}
+
+export function stepAging(simulation: SimulationState, hooks?: AgingHooks): void {
   const tickStream = simulation.rng.tick;
   for (const agent of simulation.agents) {
     agent.ageTicks += 1;
@@ -38,7 +42,11 @@ export function stepAging(simulation: SimulationState): void {
     if (typeof limit === 'number' && limit > 0 && agent.ageTicks >= limit) {
       const nextStage = NEXT_STAGE[agent.lifeStage];
       if (nextStage) {
+        const wasAdult = agent.lifeStage === 'adult';
         transitionToStage(agent, nextStage, tickStream);
+        if (!wasAdult && agent.lifeStage === 'adult') {
+          hooks?.onEnterAdulthood?.(agent, simulation);
+        }
       } else {
         agent.ageTicks = limit;
       }
@@ -46,7 +54,11 @@ export function stepAging(simulation: SimulationState): void {
   }
 }
 
-function transitionToStage(agent: AgentState, stage: LifeStage, tickStream: RngStream): void {
+export function transitionToStage(
+  agent: AgentState,
+  stage: LifeStage,
+  tickStream: RngStream,
+): void {
   const previousStage = agent.lifeStage;
   if (previousStage === stage) {
     return;
