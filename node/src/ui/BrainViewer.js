@@ -149,7 +149,8 @@ export class BrainViewer {
     this._edges = [];
     this._nodePositions = new Map();
     this._edgeSegments = [];
-    this._particles = [];
+    this._nodeDurations = new Map();
+    this._activePulses = [];
     this._pixelRatio = window.devicePixelRatio || 1;
     this._width = 0;
     this._height = 0;
@@ -159,6 +160,10 @@ export class BrainViewer {
     this._lastTimestamp = null;
     this._decisionEdgeKey = 'none';
     this._decisionPulse = 0;
+    this._transitionTiming = null;
+    this._lastTickDurationMs = 500;
+    this._isPaused = false;
+    this._pauseTimestamp = null;
 
     this._handleResize = this._handleResize.bind(this);
     this._renderFrame = this._renderFrame.bind(this);
@@ -181,6 +186,7 @@ export class BrainViewer {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
+    this._activePulses = [];
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
     } else {
@@ -189,14 +195,29 @@ export class BrainViewer {
   }
 
   setData(data) {
+    const transition = data?.transition ?? null;
+    if (transition) {
+      this._lastTickDurationMs = this._resolveTickDurationMs(transition);
+    }
     const signature = computeDataSignature(data);
     if (signature === this._dataSignature) {
-      this._updateDecisionState(data?.decision ?? null);
+      this._transitionTiming = transition;
+      this._updateDecisionState(data?.decision ?? null, transition);
       return;
     }
 
     this._dataSignature = signature;
-    this._data = data && Array.isArray(data.nodes) && data.nodes.length > 0 ? data : null;
+    const hasNodes = data && Array.isArray(data.nodes) && data.nodes.length > 0;
+    this._data = hasNodes
+      ? {
+          nodes: data.nodes,
+          edges: data.edges,
+          currentNodeId: data.currentNodeId ?? data.summary?.nodeId ?? null,
+          decision: data.decision ?? null,
+          transition,
+          summary: data.summary ?? null,
+        }
+      : null;
     this.emptyState.style.display = this._data ? 'none' : 'flex';
     if (!this._data) {
       this.setLabel(null);
@@ -207,9 +228,11 @@ export class BrainViewer {
       this._edges = [];
       this._nodePositions.clear();
       this._edgeSegments = [];
-      this._particles = [];
+      this._nodeDurations.clear();
+      this._activePulses = [];
       this._decisionEdgeKey = 'none';
       this._decisionPulse = 0;
+      this._transitionTiming = transition;
       this._needsLayout = true;
       this._needsRedraw = true;
       this._stopAnimation();
@@ -217,7 +240,8 @@ export class BrainViewer {
       return;
     }
 
-    this._orderedNodes = [...this._data.nodes].filter((node) => node && node.id).sort((a, b) => {
+    this._orderedNodes = [...this._data.nodes].filter((node) => node && node.id).map((node) => ({ ...node }));
+    this._orderedNodes.sort((a, b) => {
       return String(a.id).localeCompare(String(b.id));
     });
 
@@ -232,22 +256,23 @@ export class BrainViewer {
 
     this._nodePositions = new Map();
     this._edgeSegments = [];
-    this._particles = [];
+    this._nodeDurations = new Map(
+      this._orderedNodes.map((node) => [node.id, this._sanitizeDuration(node.duration)]),
+    );
+    this._activePulses = [];
     this._needsLayout = true;
     this._needsRedraw = true;
-    this._updateDecisionState(this._data.decision ?? null, true);
+    this._transitionTiming = transition;
+    this._updateDecisionState(this._data.decision ?? null, transition, true);
 
-    const totalParticles = Math.max(6, Math.min(48, this._edges.length * 3));
-    for (let i = 0; i < totalParticles; i += 1) {
-      const edge = this._edges[i % this._edges.length];
-      this._particles.push({
-        edgeId: edge.id,
-        t: Math.random(),
-        speed: 0.12 + Math.random() * 0.25,
-      });
+    if (this._isPaused) {
+      if (this._needsLayout) {
+        this._rebuildLayout();
+      }
+      this._draw();
+    } else {
+      this._startAnimation();
     }
-
-    this._startAnimation();
   }
 
   setLabel(label) {
@@ -257,15 +282,98 @@ export class BrainViewer {
     this.labelEl.style.opacity = text ? '0.92' : '0';
   }
 
-  _updateDecisionState(decision, forcePulse = false) {
-    const key = decision
-      ? `${decision.fromNodeId ?? ''}->${decision.chosenNodeId ?? ''}|${(decision.candidates ?? []).length}`
-      : 'none';
-    if (forcePulse || key !== this._decisionEdgeKey) {
-      this._decisionPulse = decision ? 1 : 0;
+  setPaused(isPaused) {
+    const next = Boolean(isPaused);
+    if (next === this._isPaused) {
+      return;
     }
+
+    this._isPaused = next;
+    if (next) {
+      this._pauseTimestamp = typeof performance !== 'undefined' ? performance.now() : null;
+      this._stopAnimation();
+      if (this._data) {
+        if (this._needsLayout) {
+          this._rebuildLayout();
+        }
+        this._draw();
+      }
+      return;
+    }
+
+    const resumeTime = typeof performance !== 'undefined' ? performance.now() : null;
+    if (resumeTime != null && this._pauseTimestamp != null) {
+      const pausedDuration = resumeTime - this._pauseTimestamp;
+      for (const pulse of this._activePulses) {
+        pulse.startedAt += pausedDuration;
+      }
+    }
+    this._pauseTimestamp = null;
+    this._lastTimestamp = null;
+    this._needsRedraw = true;
+    if (this._data) {
+      this._startAnimation();
+    } else {
+      this._drawBackground();
+    }
+  }
+
+  _sanitizeDuration(duration) {
+    const numeric = Number(duration);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return 1;
+    }
+    return numeric;
+  }
+
+  _resolveTickDurationMs(timing) {
+    if (timing && Number.isFinite(timing.tickDurationMs) && timing.tickDurationMs > 0) {
+      return timing.tickDurationMs;
+    }
+    if (timing && Number.isFinite(timing.tickIntervalMs) && Number.isFinite(timing.ticksPerUpdate) && timing.ticksPerUpdate > 0) {
+      return timing.tickIntervalMs / timing.ticksPerUpdate;
+    }
+    if (timing && Number.isFinite(timing.tickIntervalMs) && timing.tickIntervalMs > 0) {
+      return timing.tickIntervalMs;
+    }
+    return this._lastTickDurationMs > 0 ? this._lastTickDurationMs : 1;
+  }
+
+  _resolveNodeDuration(nodeId) {
+    if (!nodeId) {
+      return 1;
+    }
+    if (this._nodeDurations.has(nodeId)) {
+      return this._nodeDurations.get(nodeId);
+    }
+    return 1;
+  }
+
+  _updateDecisionState(decision, timing = null, forcePulse = false) {
+    const edgeId = decision && decision.fromNodeId && decision.chosenNodeId
+      ? `${decision.fromNodeId}->${decision.chosenNodeId}`
+      : null;
+    const key = decision
+      ? `${edgeId ?? ''}|${(decision.candidates ?? []).length}`
+      : 'none';
+    const isNewDecision = forcePulse || key !== this._decisionEdgeKey;
+
+    if (timing) {
+      this._lastTickDurationMs = this._resolveTickDurationMs(timing);
+    }
+
+    if (isNewDecision) {
+      this._decisionPulse = decision ? 1 : 0;
+      if (decision && edgeId) {
+        this._spawnPulse(edgeId, decision, timing);
+      }
+    } else if (decision && edgeId && timing) {
+      this._syncPulsesWithTiming(edgeId, timing);
+    }
+
     this._decisionEdgeKey = key;
     this._decision = decision ?? null;
+    this._transitionTiming = timing ?? this._transitionTiming;
     this._needsRedraw = true;
   }
 
@@ -288,14 +396,21 @@ export class BrainViewer {
     this._needsRedraw = true;
 
     if (this._data) {
-      this._startAnimation();
+      if (this._isPaused) {
+        if (this._needsLayout) {
+          this._rebuildLayout();
+        }
+        this._draw();
+      } else {
+        this._startAnimation();
+      }
     } else {
       this._drawBackground();
     }
   }
 
   _startAnimation() {
-    if (this._rafId !== null) {
+    if (this._rafId !== null || this._isPaused) {
       return;
     }
     this._lastTimestamp = null;
@@ -324,7 +439,7 @@ export class BrainViewer {
       this._rebuildLayout();
     }
 
-    this._advanceParticles(dt);
+    this._advancePulses(timestamp);
     this._decisionPulse = Math.max(0, this._decisionPulse - dt * 0.5);
 
     if (this._needsRedraw || dt > 0) {
@@ -368,6 +483,7 @@ export class BrainViewer {
           from,
           to,
           weight: edge.weight,
+          length: Math.hypot(to.x - from.x, to.y - from.y),
         };
       })
       .filter(Boolean);
@@ -375,23 +491,165 @@ export class BrainViewer {
     this._needsRedraw = true;
   }
 
-  _advanceParticles(dt) {
-    if (!dt || !this._particles.length) {
+  _advancePulses(timestamp) {
+    if (!this._activePulses.length || !this._edgeSegments.length) {
+      return;
+    }
+
+    const now = timestamp ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const segmentsById = new Map(this._edgeSegments.map((segment) => [segment.id, segment]));
+    const active = [];
+    let changed = false;
+    for (const pulse of this._activePulses) {
+      const segment = segmentsById.get(pulse.edgeId);
+      if (!segment) {
+        changed = true;
+        continue;
+      }
+      const durationMs = pulse.durationMs > 0 ? pulse.durationMs : this._lastTickDurationMs;
+      const elapsedMs = Math.max(0, now - pulse.startedAt);
+      const progress = durationMs > 0 ? Math.min(1, elapsedMs / durationMs) : 1;
+      if (Math.abs(progress - (pulse.progress ?? 0)) > 0.001) {
+        changed = true;
+      }
+      pulse.progress = progress;
+      pulse.segment = segment;
+      if (progress < 1) {
+        active.push(pulse);
+      } else {
+        changed = true;
+      }
+    }
+    if (changed) {
+      this._needsRedraw = true;
+    }
+    this._activePulses = active;
+  }
+
+  _createPulseAppearance(kind) {
+    if (kind === 'decision') {
+      return {
+        color: PARTICLE_DECISION_COLOR,
+        opacity: 0.95,
+        size: 3.6,
+        trailColor: 'rgba(56, 189, 248, 0.45)',
+        trailWidth: 1.4,
+        glowColor: 'rgba(56, 189, 248, 0.28)',
+        glowSize: 9,
+      };
+    }
+    return {
+      color: PARTICLE_COLOR,
+      opacity: 0.78,
+      size: 2.6,
+    };
+  }
+
+  _spawnPulse(edgeId, decision, timing) {
+    if (!edgeId) {
+      return;
+    }
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const toNodeId = decision?.chosenNodeId ?? null;
+    const durationTicks = timing && Number.isFinite(timing.durationTicks) && timing.durationTicks > 0
+      ? timing.durationTicks
+      : this._resolveNodeDuration(toNodeId);
+    const tickDurationMs = this._resolveTickDurationMs(timing);
+    const pulse = {
+      id: `${now}-${Math.random().toString(16).slice(2)}`,
+      kind: 'decision',
+      edgeId,
+      fromNodeId: decision?.fromNodeId ?? null,
+      toNodeId,
+      startedAt: now,
+      durationTicks,
+      durationMs: Math.max(tickDurationMs, durationTicks * tickDurationMs),
+      progress: 0,
+      appearance: this._createPulseAppearance('decision'),
+      segment: null,
+    };
+    if (timing) {
+      this._syncPulseWithTiming(pulse, timing, now);
+    }
+    this._activePulses.push(pulse);
+    this._needsRedraw = true;
+  }
+
+  _syncPulseWithTiming(pulse, timing, now = typeof performance !== 'undefined' ? performance.now() : Date.now()) {
+    if (!timing) {
+      return;
+    }
+    const tickDurationMs = this._resolveTickDurationMs(timing);
+    const durationTicks = timing && Number.isFinite(timing.durationTicks) && timing.durationTicks > 0
+      ? timing.durationTicks
+      : pulse.durationTicks ?? this._resolveNodeDuration(pulse.toNodeId);
+    const safeDurationTicks = Math.max(1, durationTicks);
+    const remainingTicks = timing && Number.isFinite(timing.remainingTicks)
+      ? Math.max(0, Math.min(safeDurationTicks, timing.remainingTicks))
+      : Math.max(0, safeDurationTicks - (timing.elapsedTicks ?? 0));
+    const elapsedTicks = Math.max(0, Math.min(safeDurationTicks, safeDurationTicks - remainingTicks));
+    pulse.durationTicks = safeDurationTicks;
+    pulse.durationMs = Math.max(tickDurationMs, safeDurationTicks * tickDurationMs);
+    const elapsedMs = Math.min(pulse.durationMs, elapsedTicks * tickDurationMs);
+    pulse.startedAt = now - elapsedMs;
+    pulse.progress = pulse.durationMs > 0 ? Math.min(1, elapsedMs / pulse.durationMs) : 1;
+  }
+
+  _syncPulsesWithTiming(edgeId, timing) {
+    if (!edgeId || !timing) {
+      return;
+    }
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    for (const pulse of this._activePulses) {
+      if (pulse.edgeId === edgeId) {
+        this._syncPulseWithTiming(pulse, timing, now);
+      }
+    }
+    this._needsRedraw = true;
+  }
+
+  _drawPulses(ctx) {
+    if (!this._activePulses.length || !this._edgeSegments.length) {
       return;
     }
     const segmentsById = new Map(this._edgeSegments.map((segment) => [segment.id, segment]));
-    for (const particle of this._particles) {
-      particle.t += particle.speed * dt;
-      while (particle.t > 1) {
-        particle.t -= 1;
+    for (const pulse of this._activePulses) {
+      const segment = segmentsById.get(pulse.edgeId);
+      if (!segment) {
+        continue;
       }
-      if (!segmentsById.has(particle.edgeId)) {
-        const randomSegment = this._edgeSegments[Math.floor(Math.random() * this._edgeSegments.length)];
-        if (randomSegment) {
-          particle.edgeId = randomSegment.id;
-          particle.t = Math.random();
-        }
+      const t = Math.max(0, Math.min(1, pulse.progress ?? 0));
+      const x = segment.from.x + (segment.to.x - segment.from.x) * t;
+      const y = segment.from.y + (segment.to.y - segment.from.y) * t;
+      const appearance = pulse.appearance ?? {};
+      const size = appearance.size ?? 3;
+      const opacity = appearance.opacity ?? 0.85;
+      const color = appearance.color ?? PARTICLE_COLOR;
+      ctx.save();
+      if (appearance.trailColor && appearance.trailWidth) {
+        const trailFactor = 0.1;
+        const trailT = Math.max(0, t - trailFactor);
+        const trailX = segment.from.x + (segment.to.x - segment.from.x) * trailT;
+        const trailY = segment.from.y + (segment.to.y - segment.from.y) * trailT;
+        ctx.strokeStyle = appearance.trailColor;
+        ctx.lineWidth = appearance.trailWidth;
+        ctx.globalAlpha = Math.min(0.7, opacity);
+        ctx.beginPath();
+        ctx.moveTo(trailX, trailY);
+        ctx.lineTo(x, y);
+        ctx.stroke();
       }
+      if (appearance.glowColor && appearance.glowSize) {
+        ctx.fillStyle = appearance.glowColor;
+        ctx.globalAlpha = Math.min(0.6, opacity * 0.6);
+        ctx.beginPath();
+        ctx.arc(x, y, appearance.glowSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = color;
+      ctx.globalAlpha = opacity;
+      ctx.fillRect(x - size / 2, y - size / 2, size, size);
+      ctx.restore();
     }
   }
 
@@ -537,22 +795,7 @@ export class BrainViewer {
       }
     }
 
-    if (this._particles.length && this._edgeSegments.length) {
-      const segmentsById = new Map(this._edgeSegments.map((segment) => [segment.id, segment]));
-      for (const particle of this._particles) {
-        const segment = segmentsById.get(particle.edgeId);
-        if (!segment) continue;
-        const isDecision = decisionKey !== 'none' && decisionKey.startsWith(segment.id);
-        const x = segment.from.x + (segment.to.x - segment.from.x) * particle.t;
-        const y = segment.from.y + (segment.to.y - segment.from.y) * particle.t;
-        ctx.save();
-        ctx.fillStyle = isDecision ? PARTICLE_DECISION_COLOR : PARTICLE_COLOR;
-        ctx.globalAlpha = isDecision ? 0.95 : 0.75;
-        const size = isDecision ? 3.4 : 2.6;
-        ctx.fillRect(x - size / 2, y - size / 2, size, size);
-        ctx.restore();
-      }
-    }
+    this._drawPulses(ctx);
 
     ctx.restore();
   }
