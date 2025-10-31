@@ -1,3 +1,11 @@
+import { BrainViewer } from './BrainViewer.js';
+import adultMindRaw from '../sim/data/AdultMind_v1.json?raw';
+import babyMindRaw from '../sim/data/BabyMind_v1.json?raw';
+import childMindRaw from '../sim/data/ChildMind_v1.json?raw';
+import teenMindRaw from '../sim/data/TeenMind_v1.json?raw';
+import houseMindRaw from '../sim/data/HouseMind_v1.json?raw';
+import urbanMindRaw from '../sim/data/UrbanMind_v1.json?raw';
+
 const SECTION_GAP = '12px';
 const MUTED_TEXT_COLOR = 'rgba(226, 232, 240, 0.68)';
 const PRIMARY_TEXT_COLOR = '#f8fafc';
@@ -5,6 +13,54 @@ const PANEL_BACKGROUND = 'rgba(15, 23, 42, 0.82)';
 const BORDER_COLOR = 'rgba(148, 163, 184, 0.25)';
 const BAR_TRACK_COLOR = 'rgba(51, 65, 85, 0.6)';
 const BAR_FILL_COLOR = '#38bdf8';
+
+const RAW_BRAINS = [
+  adultMindRaw,
+  babyMindRaw,
+  childMindRaw,
+  teenMindRaw,
+  houseMindRaw,
+  urbanMindRaw,
+];
+
+const BRAIN_LIBRARY = buildBrainLibrary();
+
+function buildBrainLibrary() {
+  const library = new Map();
+  for (const raw of RAW_BRAINS) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed?.name) continue;
+      const nodes = Array.isArray(parsed.nodes)
+        ? parsed.nodes.map((node) => ({
+            id: node.id,
+            label: node.id,
+            baseFrequency: Number(node.base_freq ?? 0),
+            duration: Number(node.duration ?? 0),
+            tags: Array.isArray(node.tags) ? [...node.tags] : [],
+          }))
+        : [];
+      const edges = Array.isArray(parsed.edges)
+        ? parsed.edges
+            .map((edge) => ({
+              from: edge?.[0],
+              to: edge?.[1],
+              weight: Number(edge?.[2] ?? 0),
+            }))
+            .filter((edge) => edge.from && edge.to)
+        : [];
+      library.set(parsed.name, Object.freeze({ id: parsed.name, nodes, edges }));
+    } catch (error) {
+      console.warn('Failed to parse brain definition for inspector', error);
+    }
+  }
+  return library;
+}
+
+function getBrainGraph(brainId) {
+  if (!brainId) return null;
+  return BRAIN_LIBRARY.get(brainId) ?? null;
+}
 
 function formatValue(value) {
   if (value === null || value === undefined) {
@@ -75,11 +131,21 @@ export class Inspector {
     });
     this.root.appendChild(this.bodyEl);
 
+    this.brainSection = this._createSection('Brain Activity');
+    Object.assign(this.brainSection.content.style, {
+      display: 'flex',
+      padding: '8px',
+    });
+    this.brainViewer = new BrainViewer({ minHeight: 220 });
+    this.brainSection.content.appendChild(this.brainViewer.element);
+    this.brainSection.root.style.display = 'none';
+
     this.identitySection = this._createInfoSection('Identity');
     this.statusSection = this._createInfoSection('Status');
     this.moodSection = this._createBarSection('Moods');
     this.temperamentSection = this._createBarSection('Temperament');
 
+    this.bodyEl.appendChild(this.brainSection.root);
     this.bodyEl.appendChild(this.identitySection.root);
     this.bodyEl.appendChild(this.statusSection.root);
     this.bodyEl.appendChild(this.moodSection.root);
@@ -97,6 +163,8 @@ export class Inspector {
       this.placeholderEl.style.display = 'block';
       this.bodyEl.style.display = 'none';
       this.titleEl.textContent = 'Agent Inspector';
+      this.brainViewer.setData(null);
+      this.brainSection.root.style.display = 'none';
       return;
     }
 
@@ -105,6 +173,7 @@ export class Inspector {
     this.titleEl.textContent = `Agent ${this.agent.id ?? ''}`.trim();
 
     const brainSummary = this.agent.brain?.summary ?? null;
+    this._updateBrainSection(brainSummary);
 
     const identityData = {
       'Agent ID': this.agent.id ?? '–',
@@ -139,6 +208,33 @@ export class Inspector {
 
     this._updateBarSection(this.moodSection, this.agent.moods);
     this._updateBarSection(this.temperamentSection, this.agent.temperament, this.agent.pregnancy?.fetusTemperament);
+  }
+
+  _updateBrainSection(brainSummary) {
+    const brainId =
+      brainSummary?.brainId ??
+      this.agent?.brain_name ??
+      this.agent?.brainId ??
+      this.agent?.brain?.state?.brainId ??
+      null;
+    const graph = getBrainGraph(brainId);
+    if (!graph) {
+      this.brainViewer.setData(null);
+      this.brainSection.root.style.display = 'none';
+      return;
+    }
+
+    const currentNodeId =
+      brainSummary?.nodeId ?? this.agent?.brainNode ?? this.agent?.current_node ?? this.agent?.brain?.state?.currentNodeId ?? null;
+    const decision = brainSummary?.decision ?? this.agent?.brainDecision ?? this.agent?.brain?.state?.lastDecision ?? null;
+
+    this.brainViewer.setData({
+      nodes: graph.nodes.map((node) => ({ ...node })),
+      edges: graph.edges.map((edge) => ({ ...edge })),
+      currentNodeId,
+      decision,
+    });
+    this.brainSection.root.style.display = 'flex';
   }
 
   _applyRootStyles() {
