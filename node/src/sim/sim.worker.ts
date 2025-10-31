@@ -845,7 +845,10 @@ export function stepSimulationState(simulation: SimulationState): void {
   simulation.agents.forEach((agent) => {
     const wasTrackedAgent = trackedAgentId === agent.id;
     const previousNodeId = agent.brain.currentNodeId;
-    const brainResult = tickBrain(agent.brain, agent.brainMultipliers, agent.moods);
+    const brainResult = tickBrain(agent.brain, agent.brainMultipliers, agent.moods, {
+      rng: simulation.rng.tick,
+      tick: simulation.tick,
+    });
     agent.brainNodeDuration = brainResult.nodeDuration;
     agent.brainDecision = brainResult.decision;
 

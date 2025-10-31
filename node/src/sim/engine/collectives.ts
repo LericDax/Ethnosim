@@ -415,7 +415,7 @@ export function updateCollectiveDemands(
       currentTick,
       rng: options.rng ?? null,
     });
-    runCityScheduler(city, currentTick);
+    runCityScheduler(city, { currentTick, rng: options.rng ?? null });
     if (city.activeDemand && Object.keys(city.activeDemand).length > 0 && currentTick <= city.demandExpiresAt) {
       const radiusSq = city.radius * city.radius;
       for (const agent of agents) {
@@ -435,7 +435,7 @@ export function updateCollectiveDemands(
   }
 
   for (const house of houses) {
-    runHouseScheduler(house);
+    runHouseScheduler(house, { currentTick, rng: options.rng ?? null });
     if (house.members.length === 0) {
       continue;
     }
@@ -801,38 +801,40 @@ export function cloneLeaderDescriptor(
   };
 }
 
-function runHouseScheduler(house: HouseState): void {
-  if (house.brain.nodeTimer > 1) {
-    house.brain.nodeTimer -= 1;
-  } else {
-    const tickResult = tickBrain(house.brain, {});
-    house.brainDecision = tickResult.decision;
-    house.brainNodeDuration = HOUSE_NODE_DURATION;
-    house.brain.nodeTimer = HOUSE_NODE_DURATION;
-  }
-
+function runHouseScheduler(
+  house: HouseState,
+  context: { currentTick: number; rng?: RngStream | null },
+): void {
+  const tickResult = tickBrain(house.brain, {}, {}, {
+    rng: context.rng ?? null,
+    tick: context.currentTick,
+  });
+  house.brainDecision = tickResult.decision;
+  house.brainNodeDuration = tickResult.nodeDuration || HOUSE_NODE_DURATION;
   const template = HOUSE_DEMAND_TEMPLATES[house.brain.currentNodeId];
   house.activeDemand = template ? { ...template.tagMultipliers } : {};
 }
 
-function runCityScheduler(city: CityState, currentTick: number): void {
-  if (city.brain.nodeTimer > 1) {
-    city.brain.nodeTimer -= 1;
-  } else {
-    const tickResult = tickBrain(city.brain, {});
-    const duration = tickResult.nodeDuration || 72;
-    city.brainDecision = tickResult.decision;
-    city.brainNodeDuration = duration;
-    city.brain.nodeTimer = duration;
-    city.activeDemand = cloneCityDemand(city.brain.currentNodeId);
-    city.demandExpiresAt = currentTick + duration;
-    return;
-  }
+function runCityScheduler(
+  city: CityState,
+  context: { currentTick: number; rng?: RngStream | null },
+): void {
+  const previousNodeId = city.brain.currentNodeId;
+  const tickResult = tickBrain(city.brain, {}, {}, {
+    rng: context.rng ?? null,
+    tick: context.currentTick,
+  });
+  const duration = tickResult.nodeDuration || 72;
+  city.brainDecision = tickResult.decision;
+  city.brainNodeDuration = duration;
 
-  if (currentTick > city.demandExpiresAt) {
-    const duration = city.brain.nodeTimer || 72;
+  const nodeChanged = city.brain.currentNodeId !== previousNodeId;
+  if (nodeChanged || !city.activeDemand) {
     city.activeDemand = cloneCityDemand(city.brain.currentNodeId);
-    city.demandExpiresAt = currentTick + duration;
+    city.demandExpiresAt = context.currentTick + duration;
+  } else if (context.currentTick > city.demandExpiresAt) {
+    city.activeDemand = cloneCityDemand(city.brain.currentNodeId);
+    city.demandExpiresAt = context.currentTick + duration;
   }
 }
 
