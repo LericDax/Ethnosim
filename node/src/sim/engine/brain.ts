@@ -114,6 +114,8 @@ interface BrainPulse {
   travelDuration: number;
   elapsed: number;
   strength: number;
+  payload: number;
+  payloadRate: number;
   appearance?: BrainPulseAppearance;
 }
 
@@ -125,6 +127,8 @@ export interface BrainPulseEvent {
   startedTick: number;
   travelDuration: number;
   strength: number;
+  payload: number;
+  payloadRate: number;
   appearance?: BrainPulseAppearance;
 }
 
@@ -196,6 +200,8 @@ interface SerializedBrainPulse {
   travelDuration: number;
   elapsed: number;
   strength: number;
+  payload: number;
+  payloadRate: number;
   appearance?: BrainPulseAppearance;
 }
 
@@ -213,6 +219,16 @@ const PULSE_THRESHOLD = 1;
 const PULSE_EVENT_TTL = 128;
 const PULSE_LEAK_MULTIPLIER = 0.96;
 const PULSE_JITTER_RANGE = 0.18;
+const PULSE_MAX_SPLITS_PER_EDGE = 4;
+const PULSE_TARGET_PAYLOAD = 0.08;
+const PULSE_MIN_PAYLOAD = 0.015;
+const PULSE_PAYLOAD_JITTER_RANGE = 0.22;
+const PULSE_TRAVEL_BASE_RATIO = 0.45;
+const PULSE_TRAVEL_VARIANCE = 0.35;
+const PULSE_TRAVEL_PAYLOAD_BIAS = 0.5;
+const PULSE_TRAVEL_DURATION_JITTER = 0.18;
+const PULSE_TRAVEL_MAX_RATIO = 1.8;
+const PULSE_VISUAL_REFERENCE_PAYLOAD = 0.24;
 const DEFAULT_CHARGE_CAPACITY = PULSE_THRESHOLD;
 const DEFAULT_CHARGE_LEAK = PULSE_LEAK_MULTIPLIER;
 const DEFAULT_PULSE_BUDGET_SCALE = 1;
@@ -638,6 +654,8 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       travelDuration: pulse.travelDuration,
       elapsed: pulse.elapsed,
       strength: pulse.strength,
+      payload: pulse.payload,
+      payloadRate: pulse.payloadRate,
       appearance: clonePulseAppearance(pulse.appearance),
     })),
     nodeCharge,
@@ -649,6 +667,8 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       startedTick: event.startedTick,
       travelDuration: event.travelDuration,
       strength: event.strength,
+      payload: event.payload,
+      payloadRate: event.payloadRate,
       appearance: clonePulseAppearance(event.appearance),
     })),
     nextPulseId: state.nextPulseId,
@@ -682,17 +702,31 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
 
   base.jumpEdgeCooldowns = { ...(serialized.jumpEdgeCooldowns ?? {}) };
   base.plasticity = restorePlasticityState(serialized.plasticity);
-  base.pendingPulses = (serialized.pendingPulses ?? []).map((pulse) => ({
-    id: pulse.id,
-    edgeKey: pulse.edgeKey,
-    sourceNodeId: pulse.sourceNodeId,
-    targetNodeId: pulse.targetNodeId,
-    startedTick: pulse.startedTick,
-    travelDuration: pulse.travelDuration,
-    elapsed: pulse.elapsed,
-    strength: pulse.strength,
-    appearance: clonePulseAppearance(pulse.appearance),
-  }));
+  base.pendingPulses = (serialized.pendingPulses ?? []).map((pulse) => {
+    const travelDuration = Math.max(1, Math.round(pulse.travelDuration ?? 1));
+    const elapsed = Math.max(0, Math.min(travelDuration, Math.round(pulse.elapsed ?? 0)));
+    const payload = Number.isFinite(pulse.payload) ? pulse.payload : pulse.strength ?? 0;
+    const normalizedPayload = Number.isFinite(payload) ? payload : 0;
+    const payloadRate = Number.isFinite(pulse.payloadRate)
+      ? pulse.payloadRate
+      : travelDuration > 0
+        ? normalizedPayload / travelDuration
+        : normalizedPayload;
+    const strength = Number.isFinite(pulse.strength) ? pulse.strength : clamp01(normalizedPayload);
+    return {
+      id: pulse.id,
+      edgeKey: pulse.edgeKey,
+      sourceNodeId: pulse.sourceNodeId,
+      targetNodeId: pulse.targetNodeId,
+      startedTick: pulse.startedTick,
+      travelDuration,
+      elapsed,
+      strength,
+      payload: normalizedPayload,
+      payloadRate,
+      appearance: clonePulseAppearance(pulse.appearance),
+    } satisfies BrainPulse;
+  });
   base.nodeCharge = new Map();
   for (const [nodeId, charge] of Object.entries(serialized.nodeCharge ?? {})) {
     const value = Number(charge?.value ?? 0);
@@ -704,16 +738,29 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
       });
     }
   }
-  base.pulseEvents = (serialized.pulseEvents ?? []).map((event) => ({
-    id: event.id,
-    edgeKey: event.edgeKey,
-    sourceNodeId: event.sourceNodeId,
-    targetNodeId: event.targetNodeId,
-    startedTick: event.startedTick,
-    travelDuration: event.travelDuration,
-    strength: event.strength,
-    appearance: clonePulseAppearance(event.appearance),
-  }));
+  base.pulseEvents = (serialized.pulseEvents ?? []).map((event) => {
+    const travelDuration = Math.max(1, Math.round(event.travelDuration ?? 1));
+    const payload = Number.isFinite(event.payload) ? event.payload : event.strength ?? 0;
+    const normalizedPayload = Number.isFinite(payload) ? payload : 0;
+    const payloadRate = Number.isFinite(event.payloadRate)
+      ? event.payloadRate
+      : travelDuration > 0
+        ? normalizedPayload / travelDuration
+        : normalizedPayload;
+    const strength = Number.isFinite(event.strength) ? event.strength : clamp01(normalizedPayload);
+    return {
+      id: event.id,
+      edgeKey: event.edgeKey,
+      sourceNodeId: event.sourceNodeId,
+      targetNodeId: event.targetNodeId,
+      startedTick: event.startedTick,
+      travelDuration,
+      strength,
+      payload: normalizedPayload,
+      payloadRate,
+      appearance: clonePulseAppearance(event.appearance),
+    } satisfies BrainPulseEvent;
+  });
   base.nextPulseId = typeof serialized.nextPulseId === 'number' ? serialized.nextPulseId : 1;
   return base;
 }
@@ -872,64 +919,215 @@ function distributePulseBudget(
 
   const rng = context.rng ?? null;
   const jitterRange = PULSE_JITTER_RANGE;
-  const travelDuration = Math.max(1, Math.round(duration * 0.5));
   const currentTick = typeof context.tick === 'number' ? context.tick : 0;
   const palette = context.pulsePalette ?? DEFAULT_PULSE_PALETTE;
 
-  const provisionalStrengths: number[] = [];
+  const provisionalBudgets: number[] = [];
   for (const candidate of candidates) {
     if (candidate.desirability <= 0) {
-      provisionalStrengths.push(0);
+      provisionalBudgets.push(0);
       continue;
     }
     const share = candidate.desirability / totalDesirability;
-    let jitter = 0;
-    if (rng) {
-      jitter = (rng.nextFloat() * 2 - 1) * jitterRange;
-    }
-    const strength = Math.max(0, baseBudget * share * (1 + jitter));
-    provisionalStrengths.push(strength);
+    const jitter = rng ? (rng.nextFloat() * 2 - 1) * jitterRange : 0;
+    const allocation = Math.max(0, baseBudget * share * (1 + jitter));
+    provisionalBudgets.push(allocation);
   }
 
-  const provisionalTotal = provisionalStrengths.reduce((sum, value) => sum + value, 0);
+  const provisionalTotal = provisionalBudgets.reduce((sum, value) => sum + value, 0);
   const normalization = provisionalTotal > 0 ? baseBudget / provisionalTotal : 0;
+  const normalizedBudgets = provisionalBudgets.map((value) => value * normalization);
 
-  const normalizedStrengths = provisionalStrengths.map((value) => value * normalization);
+  const desirabilityDenominator = totalDesirability > 0 ? totalDesirability : 1;
+
+  const resolvePulseCount = (allocation: number, share: number): number => {
+    const safeAllocation = allocation > 0 ? allocation : 0;
+    const normalizedShare = clamp01(share);
+    const durationFactor = clamp(metadata.duration / 6, 0.5, 2.5);
+    const scaleFactor = clamp(metadata.pulseBudgetScale ?? 1, 0.35, 3);
+    let count = Math.round(
+      1 +
+        normalizedShare * (PULSE_MAX_SPLITS_PER_EDGE - 1) * 0.9 +
+        (durationFactor - 1) * 1.2 +
+        (scaleFactor - 1) * 0.8,
+    );
+    count = clamp(count, 1, PULSE_MAX_SPLITS_PER_EDGE);
+    const maxByMinPayload = Math.max(
+      1,
+      Math.min(PULSE_MAX_SPLITS_PER_EDGE, Math.floor(safeAllocation / PULSE_MIN_PAYLOAD)),
+    );
+    if (count > maxByMinPayload) {
+      count = maxByMinPayload;
+    }
+    const targetByPayload = Math.max(
+      1,
+      Math.min(PULSE_MAX_SPLITS_PER_EDGE, Math.round(safeAllocation / PULSE_TARGET_PAYLOAD)),
+    );
+    if (count < targetByPayload) {
+      count = Math.min(maxByMinPayload, targetByPayload);
+    }
+    return clamp(count, 1, PULSE_MAX_SPLITS_PER_EDGE);
+  };
+
+  const createPayloadWeights = (count: number): number[] => {
+    if (count <= 1) {
+      return [1];
+    }
+    const weights: number[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const jitter = rng ? (rng.nextFloat() * 2 - 1) * PULSE_PAYLOAD_JITTER_RANGE : 0;
+      const weight = Math.max(0.1, 1 + jitter);
+      weights.push(weight);
+    }
+    const total = weights.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
+      return Array(count).fill(1 / count);
+    }
+    return weights.map((value) => value / total);
+  };
+
+  const resolveTravelDuration = (weightShare: number, desirabilityShare: number): number => {
+    const normalizedWeight = clamp01(weightShare);
+    const normalizedDesire = clamp01(desirabilityShare);
+    const scaleFactor = clamp(metadata.pulseBudgetScale ?? 1, 0.2, 3);
+    const durationFactor = clamp(metadata.duration / 6, 0.4, 2.8);
+    const base = Math.max(
+      1,
+      Math.round(
+        duration *
+          (PULSE_TRAVEL_BASE_RATIO +
+            (1 - normalizedDesire) * PULSE_TRAVEL_VARIANCE +
+            (scaleFactor - 1) * 0.18 +
+            (durationFactor - 1) * 0.12),
+      ),
+    );
+    const payloadBias = 1 + normalizedWeight * PULSE_TRAVEL_PAYLOAD_BIAS;
+    const jitter = rng ? 1 + (rng.nextFloat() * 2 - 1) * PULSE_TRAVEL_DURATION_JITTER : 1;
+    const maxDuration = Math.max(1, Math.round(duration * PULSE_TRAVEL_MAX_RATIO));
+    return clamp(Math.round(base * payloadBias * jitter), 1, maxDuration);
+  };
+
   const nextPending: BrainPulse[] = [];
   const nextEvents: BrainPulseEvent[] = [];
+
   let index = 0;
   for (const candidate of candidates) {
-    const strength = normalizedStrengths[index];
+    const allocation = normalizedBudgets[index];
     index += 1;
-    if (!strength || strength <= MIN_CHARGE_VALUE) {
+    if (!allocation || allocation <= MIN_CHARGE_VALUE) {
       continue;
     }
-    const pulseId = `pulse-${state.nextPulseId}`;
-    state.nextPulseId += 1;
-    const edgeKey = makeEdgeKey(state.currentNodeId, candidate.nodeId);
-    const appearance = resolvePulseAppearance(candidate.tags ?? [], strength, palette);
-    const pulse: BrainPulse = {
-      id: pulseId,
-      edgeKey,
-      sourceNodeId: state.currentNodeId,
-      targetNodeId: candidate.nodeId,
-      startedTick: currentTick,
-      travelDuration,
-      elapsed: 0,
-      strength,
-      appearance: clonePulseAppearance(appearance),
-    };
-    nextPending.push(pulse);
-    nextEvents.push({
-      id: pulseId,
-      edgeKey,
-      sourceNodeId: pulse.sourceNodeId,
-      targetNodeId: pulse.targetNodeId,
-      startedTick: currentTick,
-      travelDuration,
-      strength,
-      appearance: clonePulseAppearance(appearance),
-    });
+    const desirabilityShare = candidate.desirability > 0 ? candidate.desirability / desirabilityDenominator : 0;
+    const pulseCount = resolvePulseCount(allocation, desirabilityShare);
+    const weights = createPayloadWeights(pulseCount);
+    let remaining = allocation;
+    const pendingBefore = nextPending.length;
+    let lastLocalPulseIndex = -1;
+    let lastLocalEventIndex = -1;
+
+    for (let i = 0; i < pulseCount; i += 1) {
+      const isLast = i === pulseCount - 1;
+      const weightShare = weights[i] ?? 0;
+      const expected = allocation * weightShare;
+      const candidatePayload = isLast ? remaining : Math.min(remaining, expected);
+      if (candidatePayload <= MIN_CHARGE_VALUE && !isLast) {
+        continue;
+      }
+      if (candidatePayload <= MIN_CHARGE_VALUE && isLast) {
+        if (lastLocalPulseIndex >= pendingBefore && remaining > MIN_CHARGE_VALUE) {
+          const tailPulse = nextPending[lastLocalPulseIndex];
+          const tailEvent = nextEvents[lastLocalEventIndex];
+          tailPulse.payload += remaining;
+          tailPulse.payloadRate = tailPulse.travelDuration > 0 ? tailPulse.payload / tailPulse.travelDuration : tailPulse.payload;
+          tailPulse.strength = clamp01(tailPulse.payload / PULSE_VISUAL_REFERENCE_PAYLOAD);
+          const updatedAppearance = resolvePulseAppearance(candidate.tags ?? [], tailPulse.strength, palette);
+          tailPulse.appearance = clonePulseAppearance(updatedAppearance);
+          if (tailEvent) {
+            tailEvent.payload = tailPulse.payload;
+            tailEvent.payloadRate = tailPulse.payloadRate;
+            tailEvent.strength = tailPulse.strength;
+            tailEvent.appearance = clonePulseAppearance(updatedAppearance);
+          }
+          remaining = 0;
+        }
+        remaining = 0;
+        continue;
+      }
+      const payload = candidatePayload;
+      remaining = Math.max(0, remaining - payload);
+      const weightRatio = allocation > 0 ? payload / allocation : 0;
+      const travelDuration = resolveTravelDuration(weightRatio, desirabilityShare);
+      const payloadRate = travelDuration > 0 ? payload / travelDuration : payload;
+      const visualStrength = clamp01(payload / PULSE_VISUAL_REFERENCE_PAYLOAD);
+      const appearance = resolvePulseAppearance(candidate.tags ?? [], visualStrength, palette);
+      const pulseId = `pulse-${state.nextPulseId}`;
+      state.nextPulseId += 1;
+      const edgeKey = makeEdgeKey(state.currentNodeId, candidate.nodeId);
+      const pulse: BrainPulse = {
+        id: pulseId,
+        edgeKey,
+        sourceNodeId: state.currentNodeId,
+        targetNodeId: candidate.nodeId,
+        startedTick: currentTick,
+        travelDuration,
+        elapsed: 0,
+        strength: visualStrength,
+        payload,
+        payloadRate,
+        appearance: clonePulseAppearance(appearance),
+      };
+      nextPending.push(pulse);
+      nextEvents.push({
+        id: pulseId,
+        edgeKey,
+        sourceNodeId: pulse.sourceNodeId,
+        targetNodeId: pulse.targetNodeId,
+        startedTick: currentTick,
+        travelDuration,
+        strength: visualStrength,
+        payload,
+        payloadRate,
+        appearance: clonePulseAppearance(appearance),
+      });
+      lastLocalPulseIndex = nextPending.length - 1;
+      lastLocalEventIndex = nextEvents.length - 1;
+    }
+
+    if (nextPending.length === pendingBefore && allocation > MIN_CHARGE_VALUE) {
+      const fallbackDuration = resolveTravelDuration(1, desirabilityShare);
+      const payloadRate = fallbackDuration > 0 ? allocation / fallbackDuration : allocation;
+      const visualStrength = clamp01(allocation / PULSE_VISUAL_REFERENCE_PAYLOAD);
+      const appearance = resolvePulseAppearance(candidate.tags ?? [], visualStrength, palette);
+      const pulseId = `pulse-${state.nextPulseId}`;
+      state.nextPulseId += 1;
+      const edgeKey = makeEdgeKey(state.currentNodeId, candidate.nodeId);
+      const pulse: BrainPulse = {
+        id: pulseId,
+        edgeKey,
+        sourceNodeId: state.currentNodeId,
+        targetNodeId: candidate.nodeId,
+        startedTick: currentTick,
+        travelDuration: fallbackDuration,
+        elapsed: 0,
+        strength: visualStrength,
+        payload: allocation,
+        payloadRate,
+        appearance: clonePulseAppearance(appearance),
+      };
+      nextPending.push(pulse);
+      nextEvents.push({
+        id: pulseId,
+        edgeKey,
+        sourceNodeId: pulse.sourceNodeId,
+        targetNodeId: pulse.targetNodeId,
+        startedTick: currentTick,
+        travelDuration: fallbackDuration,
+        strength: visualStrength,
+        payload: allocation,
+        payloadRate,
+        appearance: clonePulseAppearance(appearance),
+      });
+    }
   }
 
   if (nextPending.length > 0) {
@@ -955,7 +1153,7 @@ function advancePendingPulses(state: BrainState, brain: BrainGraphRuntime): Map<
       const pendingCharge = deposits.get(pulse.targetNodeId) ?? 0;
       const availableCapacity = Math.max(0, capacity - existingCharge - pendingCharge);
       if (availableCapacity > MIN_CHARGE_VALUE) {
-        const applied = Math.min(pulse.strength, availableCapacity);
+        const applied = Math.min(pulse.payload, availableCapacity);
         const existing = deposits.get(pulse.targetNodeId) ?? 0;
         deposits.set(pulse.targetNodeId, existing + applied);
       }
