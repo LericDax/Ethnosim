@@ -36,7 +36,7 @@ export class HUD {
     this._isPaused = false;
     this._tickInterval = DEFAULT_TICK_INTERVAL;
     this._ticksPerUpdate = 1;
-    this._agentOptionIds = new Set();
+    this._agentOptionLabels = new Map();
     this._detachSceneSelectionListener = null;
 
     this.host = document.createElement('div');
@@ -561,19 +561,20 @@ export class HUD {
     this.agentSelect.appendChild(noneOption);
 
     const currentSelection = this.scene.selectedAgentId ?? '';
-    this._agentOptionIds = new Set();
+    this._agentOptionLabels = new Map();
 
     for (const agent of agents) {
       if (!agent || !agent.id) continue;
-      this._agentOptionIds.add(agent.id);
       const option = document.createElement('option');
       option.value = agent.id;
       const lifeStage = agent.lifeStage ? ` (${agent.lifeStage})` : '';
-      option.textContent = `${agent.id}${lifeStage}`;
+      const label = `${agent.id}${lifeStage}`;
+      option.textContent = label;
+      this._agentOptionLabels.set(agent.id, label);
       this.agentSelect.appendChild(option);
     }
 
-    if (currentSelection && this._agentOptionIds.has(currentSelection)) {
+    if (currentSelection && this._agentOptionLabels.has(currentSelection)) {
       this.agentSelect.value = currentSelection;
     } else {
       this.agentSelect.value = '';
@@ -584,29 +585,34 @@ export class HUD {
   }
 
   _refreshAgentOptions(agents) {
-    const ids = new Set();
+    const nextLabels = new Map();
     for (const agent of agents) {
       if (agent && agent.id) {
-        ids.add(agent.id);
+        const lifeStage = agent.lifeStage ? ` (${agent.lifeStage})` : '';
+        nextLabels.set(agent.id, `${agent.id}${lifeStage}`);
       }
     }
 
-    if (ids.size !== this._agentOptionIds.size) {
+    if (nextLabels.size !== this._agentOptionLabels.size) {
       this._populateAgentSelect(agents);
       return;
     }
 
-    for (const id of ids) {
-      if (!this._agentOptionIds.has(id)) {
+    for (const [id, label] of nextLabels) {
+      if (!this._agentOptionLabels.has(id) || this._agentOptionLabels.get(id) !== label) {
         this._populateAgentSelect(agents);
         return;
       }
     }
 
     const currentSelection = this.scene.selectedAgentId;
-    if (currentSelection && !ids.has(currentSelection)) {
-      this.scene.setSelectedAgent(null);
-      this.agentSelect.value = '';
+    if (currentSelection && !nextLabels.has(currentSelection)) {
+      if (typeof this.scene.setSelectedAgent === 'function') {
+        this.scene.setSelectedAgent(null);
+      }
+      if (this.agentSelect) {
+        this.agentSelect.value = '';
+      }
     }
   }
 
@@ -618,7 +624,7 @@ export class HUD {
       if (
         normalized.type === 'agent' &&
         normalized.id &&
-        this._agentOptionIds.has(normalized.id)
+        this._agentOptionLabels.has(normalized.id)
       ) {
         const nextValue = normalized.id;
         if (this.agentSelect.value !== nextValue) {
