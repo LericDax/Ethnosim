@@ -185,8 +185,14 @@ export class Inspector {
     Object.assign(this.brainSection.content.style, {
       display: 'flex',
       padding: '8px',
+      width: '100%',
+      flex: '1 0 auto',
+      boxSizing: 'border-box',
     });
-    this.brainViewer = new BrainViewer({ minHeight: 220 });
+    this.brainViewer = new BrainViewer({
+      minHeight: 220,
+      viewportClamp: { min: 220, viewport: 55, max: 420 },
+    });
     this.brainSection.content.appendChild(this.brainViewer.element);
     this.brainSection.root.style.display = 'none';
 
