@@ -20,6 +20,9 @@ export interface BrainNodeDefinition {
   base_freq: number;
   duration: number;
   tags: string[];
+  charge_capacity?: number;
+  charge_leak?: number;
+  pulse_budget_scale?: number;
 }
 
 export type BrainEdgeDefinition = [string, string, number];
@@ -37,6 +40,9 @@ export interface BrainNodeMetadata {
   baseFrequency: number;
   duration: number;
   tags: string[];
+  chargeCapacity: number;
+  chargeLeak: number;
+  pulseBudgetScale: number;
 }
 
 interface BrainEdgeMetadata {
@@ -133,9 +139,14 @@ export interface BrainState {
   jumpEdgeCooldowns: JumpEdgeCooldownMap;
   plasticity: PlasticityState;
   pendingPulses: BrainPulse[];
-  nodeCharge: Map<string, number>;
+  nodeCharge: Map<string, NodeChargeState>;
   pulseEvents: BrainPulseEvent[];
   nextPulseId: number;
+}
+
+export interface NodeChargeState {
+  value: number;
+  capacity: number;
 }
 
 export interface SerializedActiveJumpEdgeState {
@@ -166,9 +177,14 @@ export interface SerializedBrainState {
   jumpEdgeCooldowns: JumpEdgeCooldownMap;
   plasticity: SerializedPlasticityState;
   pendingPulses: SerializedBrainPulse[];
-  nodeCharge: Record<string, number>;
+  nodeCharge: Record<string, SerializedNodeChargeState>;
   pulseEvents: BrainPulseEvent[];
   nextPulseId: number;
+}
+
+interface SerializedNodeChargeState {
+  value: number;
+  capacity: number;
 }
 
 interface SerializedBrainPulse {
@@ -193,6 +209,15 @@ interface BrainLibrary {
   [name: string]: BrainGraphRuntime;
 }
 
+const PULSE_THRESHOLD = 1;
+const PULSE_EVENT_TTL = 128;
+const PULSE_LEAK_MULTIPLIER = 0.96;
+const PULSE_JITTER_RANGE = 0.18;
+const DEFAULT_CHARGE_CAPACITY = PULSE_THRESHOLD;
+const DEFAULT_CHARGE_LEAK = PULSE_LEAK_MULTIPLIER;
+const DEFAULT_PULSE_BUDGET_SCALE = 1;
+const MIN_CHARGE_VALUE = 1e-4;
+
 const RAW_BRAINS: BrainGraphDefinition[] = [
   parseBrainJson(babyMindRaw),
   parseBrainJson(childMindRaw),
@@ -205,12 +230,6 @@ const RAW_BRAINS: BrainGraphDefinition[] = [
 const BRAIN_LIBRARY: BrainLibrary = Object.fromEntries(
   RAW_BRAINS.map((definition) => [definition.name, buildRuntimeGraph(definition)]),
 );
-
-const PULSE_THRESHOLD = 1;
-const PULSE_EVENT_TTL = 128;
-const PULSE_LEAK_MULTIPLIER = 0.96;
-const PULSE_JITTER_RANGE = 0.18;
-const MIN_CHARGE_VALUE = 1e-4;
 
 const DEFAULT_PULSE_PALETTE: BrainPulsePalette = Object.freeze({
   default: Object.freeze({
@@ -410,15 +429,77 @@ function parseBrainJson(raw: string): BrainGraphDefinition {
   }
 }
 
+function normalizeChargeCapacity(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= MIN_CHARGE_VALUE) {
+    return DEFAULT_CHARGE_CAPACITY;
+  }
+  return numeric;
+}
+
+function normalizeChargeLeak(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_CHARGE_LEAK;
+  }
+  if (numeric <= 0) {
+    return DEFAULT_CHARGE_LEAK;
+  }
+  if (numeric >= 1) {
+    return 1;
+  }
+  return numeric;
+}
+
+function normalizePulseBudgetScale(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return DEFAULT_PULSE_BUDGET_SCALE;
+  }
+  return numeric;
+}
+
+function getNodeChargeCapacity(metadata: BrainNodeMetadata | undefined): number {
+  return metadata?.chargeCapacity ?? DEFAULT_CHARGE_CAPACITY;
+}
+
+function getNodeChargeLeak(metadata: BrainNodeMetadata | undefined): number {
+  return metadata?.chargeLeak ?? DEFAULT_CHARGE_LEAK;
+}
+
+function getPulseBudgetScale(metadata: BrainNodeMetadata | undefined): number {
+  return metadata?.pulseBudgetScale ?? DEFAULT_PULSE_BUDGET_SCALE;
+}
+
+function setNodeChargeState(
+  state: BrainState,
+  nodeId: string,
+  value: number,
+  capacity: number,
+): void {
+  if (value <= MIN_CHARGE_VALUE) {
+    state.nodeCharge.delete(nodeId);
+    return;
+  }
+  const normalizedCapacity = capacity > MIN_CHARGE_VALUE ? capacity : DEFAULT_CHARGE_CAPACITY;
+  state.nodeCharge.set(nodeId, { value, capacity: normalizedCapacity });
+}
+
 function buildRuntimeGraph(definition: BrainGraphDefinition): BrainGraphRuntime {
   const nodes = new Map<string, BrainNodeMetadata>();
   const nodesByTag = new Map<string, string[]>();
   for (const node of definition.nodes) {
+    const chargeCapacity = normalizeChargeCapacity(node.charge_capacity);
+    const chargeLeak = normalizeChargeLeak(node.charge_leak);
+    const pulseBudgetScale = normalizePulseBudgetScale(node.pulse_budget_scale);
     nodes.set(node.id, {
       id: node.id,
       baseFrequency: node.base_freq,
       duration: node.duration,
       tags: [...node.tags],
+      chargeCapacity,
+      chargeLeak,
+      pulseBudgetScale,
     });
 
     for (const tag of node.tags) {
@@ -493,7 +574,7 @@ export function createBrainState(brainId: string): BrainState {
     jumpEdgeCooldowns: {},
     plasticity: createPlasticityState(),
     pendingPulses: [],
-    nodeCharge: new Map(),
+    nodeCharge: new Map<string, NodeChargeState>(),
     pulseEvents: [],
     nextPulseId: 1,
   };
@@ -527,6 +608,14 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
     plasticityEdges[sourceId] = serializedTargets;
   }
 
+  const nodeCharge: Record<string, SerializedNodeChargeState> = {};
+  for (const [nodeId, charge] of state.nodeCharge.entries()) {
+    nodeCharge[nodeId] = {
+      value: charge.value,
+      capacity: charge.capacity,
+    };
+  }
+
   return {
     brainId: state.brainId,
     currentNodeId: state.currentNodeId,
@@ -551,7 +640,7 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       strength: pulse.strength,
       appearance: clonePulseAppearance(pulse.appearance),
     })),
-    nodeCharge: Object.fromEntries(state.nodeCharge.entries()),
+    nodeCharge,
     pulseEvents: state.pulseEvents.map((event) => ({
       id: event.id,
       edgeKey: event.edgeKey,
@@ -604,7 +693,17 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
     strength: pulse.strength,
     appearance: clonePulseAppearance(pulse.appearance),
   }));
-  base.nodeCharge = new Map(Object.entries(serialized.nodeCharge ?? {}));
+  base.nodeCharge = new Map();
+  for (const [nodeId, charge] of Object.entries(serialized.nodeCharge ?? {})) {
+    const value = Number(charge?.value ?? 0);
+    const capacity = Number(charge?.capacity ?? DEFAULT_CHARGE_CAPACITY);
+    if (value > MIN_CHARGE_VALUE) {
+      base.nodeCharge.set(nodeId, {
+        value,
+        capacity: capacity > MIN_CHARGE_VALUE ? capacity : DEFAULT_CHARGE_CAPACITY,
+      });
+    }
+  }
   base.pulseEvents = (serialized.pulseEvents ?? []).map((event) => ({
     id: event.id,
     edgeKey: event.edgeKey,
@@ -683,14 +782,17 @@ export function tickBrain(
   }
 
   distributePulseBudget(state, candidates, metadata, context);
-  const deposits = advancePendingPulses(state);
-  applyNodeChargeDecay(state);
+  const deposits = advancePendingPulses(state, brain);
+  applyNodeChargeDecay(state, brain);
   for (const [targetId, strength] of deposits.entries()) {
     if (strength <= 0) {
       continue;
     }
-    const existing = state.nodeCharge.get(targetId) ?? 0;
-    state.nodeCharge.set(targetId, existing + strength);
+    const targetMetadata = brain.nodes.get(targetId);
+    const capacity = getNodeChargeCapacity(targetMetadata);
+    const existing = state.nodeCharge.get(targetId)?.value ?? 0;
+    const nextValue = Math.min(capacity, existing + strength);
+    setNodeChargeState(state, targetId, nextValue, capacity);
   }
 
   if (state.nodeTimer > 0) {
@@ -700,14 +802,16 @@ export function tickBrain(
   if (state.nodeTimer <= 0) {
     const bestCandidate = candidates[0];
     if (bestCandidate) {
-      const currentCharge = state.nodeCharge.get(bestCandidate.nodeId) ?? 0;
-      if (currentCharge < PULSE_THRESHOLD) {
-        state.nodeCharge.set(bestCandidate.nodeId, PULSE_THRESHOLD);
+      const targetMetadata = brain.nodes.get(bestCandidate.nodeId);
+      const threshold = getNodeChargeCapacity(targetMetadata);
+      const currentCharge = state.nodeCharge.get(bestCandidate.nodeId)?.value ?? 0;
+      if (currentCharge < threshold) {
+        setNodeChargeState(state, bestCandidate.nodeId, threshold, threshold);
       }
     }
   }
 
-  const readyTarget = resolveReadyTarget(state, candidates);
+  const readyTarget = resolveReadyTarget(state, brain, candidates);
   if (readyTarget) {
     const fromNodeId = state.currentNodeId;
     const nextNodeId = readyTarget.nodeId;
@@ -755,7 +859,8 @@ function distributePulseBudget(
   context: BrainTickContext,
 ): void {
   const duration = Math.max(1, metadata.duration);
-  const baseBudget = 1 / duration;
+  const budgetScale = getPulseBudgetScale(metadata);
+  const baseBudget = (1 / duration) * budgetScale;
   const totalDesirability = candidates.reduce((sum, candidate) => {
     return candidate.desirability > 0 ? sum + candidate.desirability : sum;
   }, 0);
@@ -835,7 +940,7 @@ function distributePulseBudget(
   }
 }
 
-function advancePendingPulses(state: BrainState): Map<string, number> {
+function advancePendingPulses(state: BrainState, brain: BrainGraphRuntime): Map<string, number> {
   if (state.pendingPulses.length === 0) {
     return new Map();
   }
@@ -844,8 +949,16 @@ function advancePendingPulses(state: BrainState): Map<string, number> {
   for (const pulse of state.pendingPulses) {
     pulse.elapsed += 1;
     if (pulse.elapsed >= pulse.travelDuration) {
-      const existing = deposits.get(pulse.targetNodeId) ?? 0;
-      deposits.set(pulse.targetNodeId, existing + pulse.strength);
+      const targetMetadata = brain.nodes.get(pulse.targetNodeId);
+      const capacity = getNodeChargeCapacity(targetMetadata);
+      const existingCharge = state.nodeCharge.get(pulse.targetNodeId)?.value ?? 0;
+      const pendingCharge = deposits.get(pulse.targetNodeId) ?? 0;
+      const availableCapacity = Math.max(0, capacity - existingCharge - pendingCharge);
+      if (availableCapacity > MIN_CHARGE_VALUE) {
+        const applied = Math.min(pulse.strength, availableCapacity);
+        const existing = deposits.get(pulse.targetNodeId) ?? 0;
+        deposits.set(pulse.targetNodeId, existing + applied);
+      }
     } else {
       remaining.push(pulse);
     }
@@ -854,27 +967,30 @@ function advancePendingPulses(state: BrainState): Map<string, number> {
   return deposits;
 }
 
-function applyNodeChargeDecay(state: BrainState): void {
+function applyNodeChargeDecay(state: BrainState, brain: BrainGraphRuntime): void {
   if (state.nodeCharge.size === 0) {
     return;
   }
-  for (const [nodeId, value] of state.nodeCharge.entries()) {
-    const decayed = value * PULSE_LEAK_MULTIPLIER;
-    if (decayed <= MIN_CHARGE_VALUE) {
-      state.nodeCharge.delete(nodeId);
-    } else {
-      state.nodeCharge.set(nodeId, decayed);
-    }
+  const entries = Array.from(state.nodeCharge.entries());
+  for (const [nodeId, charge] of entries) {
+    const metadata = brain.nodes.get(nodeId);
+    const leakMultiplier = getNodeChargeLeak(metadata);
+    const capacity = getNodeChargeCapacity(metadata);
+    const decayed = Math.min(capacity, charge.value * leakMultiplier);
+    setNodeChargeState(state, nodeId, decayed, capacity);
   }
 }
 
 function resolveReadyTarget(
   state: BrainState,
+  brain: BrainGraphRuntime,
   candidates: BrainDecisionFactor[],
 ): BrainDecisionFactor | null {
   for (const candidate of candidates) {
-    const charge = state.nodeCharge.get(candidate.nodeId) ?? 0;
-    if (charge >= PULSE_THRESHOLD) {
+    const metadata = brain.nodes.get(candidate.nodeId);
+    const threshold = getNodeChargeCapacity(metadata);
+    const charge = state.nodeCharge.get(candidate.nodeId)?.value ?? 0;
+    if (charge >= threshold) {
       return candidate;
     }
   }

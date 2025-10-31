@@ -3,10 +3,42 @@
   "name": "UrbanMind_v1",
   "nodes": [
     { "id": "CollectTribute", "base_freq": 1.0, "duration": 72, "tags": ["resource", "authority", "outward"] },
-    { "id": "MaintainOrder", "base_freq": 1.0, "duration": 72, "tags": ["authority", "control", "inward"] },
-    { "id": "ProjectDoctrine", "base_freq": 1.0, "duration": 72, "tags": ["ideology", "ritual", "authority"] },
-    { "id": "AbsorbYouth", "base_freq": 1.0, "duration": 72, "tags": ["youth", "recruit", "social"] },
-    { "id": "SanctifyBirth", "base_freq": 1.0, "duration": 72, "tags": ["ritual", "birth", "loyalty"] },
+    {
+      "id": "MaintainOrder",
+      "base_freq": 1.0,
+      "duration": 72,
+      "tags": ["authority", "control", "inward"],
+      "charge_capacity": 1.2,
+      "charge_leak": 0.985,
+      "pulse_budget_scale": 0.88
+    },
+    {
+      "id": "ProjectDoctrine",
+      "base_freq": 1.0,
+      "duration": 72,
+      "tags": ["ideology", "ritual", "authority"],
+      "charge_capacity": 1.15,
+      "charge_leak": 0.983,
+      "pulse_budget_scale": 0.9
+    },
+    {
+      "id": "AbsorbYouth",
+      "base_freq": 1.0,
+      "duration": 72,
+      "tags": ["youth", "recruit", "social"],
+      "charge_capacity": 1.18,
+      "charge_leak": 0.984,
+      "pulse_budget_scale": 0.9
+    },
+    {
+      "id": "SanctifyBirth",
+      "base_freq": 1.0,
+      "duration": 72,
+      "tags": ["ritual", "birth", "loyalty"],
+      "charge_capacity": 1.4,
+      "charge_leak": 0.988,
+      "pulse_budget_scale": 0.85
+    },
     { "id": "SuppressRivals", "base_freq": 1.0, "duration": 72, "tags": ["conflict", "authority", "outward"] }
   ],
   "edges": [

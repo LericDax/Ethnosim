@@ -4,12 +4,28 @@
   "nodes": [
     { "id": "Gather", "base_freq": 1.0, "duration": 6, "tags": ["work", "outward"] },
     { "id": "Stockpile", "base_freq": 1.0, "duration": 6, "tags": ["home", "inward"] },
-    { "id": "Socialize", "base_freq": 1.0, "duration": 6, "tags": ["home", "social", "gathering"] },
+    {
+      "id": "Socialize",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["home", "social", "gathering"],
+      "charge_capacity": 1.2,
+      "charge_leak": 0.98,
+      "pulse_budget_scale": 0.9
+    },
     { "id": "BuildDwelling", "base_freq": 0.8, "duration": 6, "tags": ["home", "build", "work"] },
     { "id": "Patrol", "base_freq": 0.8, "duration": 6, "tags": ["work", "outward", "guard", "patrol"] },
     { "id": "MarkTerritory", "base_freq": 0.6, "duration": 6, "tags": ["outward", "guard"] },
     { "id": "Wander", "base_freq": 1.0, "duration": 6, "tags": ["outward", "wander"] },
-    { "id": "Rest", "base_freq": 1.0, "duration": 6, "tags": ["home", "rest"] }
+    {
+      "id": "Rest",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["home", "rest"],
+      "charge_capacity": 1.35,
+      "charge_leak": 0.987,
+      "pulse_budget_scale": 0.82
+    }
   ],
   "edges": [
     ["Gather", "Stockpile", 1.0],
