@@ -11,17 +11,29 @@ import {
   type SerializedBrainState,
 } from './engine/brain.ts';
 import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
-import { createWorld, type WorldState } from './engine/world.ts';
+import {
+  createWorld,
+  clampPosition,
+  harvestForestResource,
+  isForestTile,
+  type WorldState,
+} from './engine/world.ts';
 import { handleReproduction, matchReproductivePartners } from './engine/repro.ts';
 import { createTraitProfile } from './engine/traits.ts';
 import {
   assignAgentsToHouses,
+  createHouseState,
   createInitialHouses,
   createUrbanCenter,
   updateCollectiveDemands,
+  HOUSE_CONSTRUCTION_COST,
+  HOUSE_CONSTRUCTION_COOLDOWN,
+  HOUSE_CONSTRUCTION_RETRY_DELAY,
   type HouseAssignableAgent,
   type HouseState,
   type CityState,
+  type ResourceBundle,
+  type ResourceType,
 } from './engine/collectives.ts';
 import {
   stepAging,
@@ -64,6 +76,11 @@ export interface StageCounts {
   adult: number;
 }
 
+export interface AgentResourceActivity {
+  harvested?: ResourceBundle;
+  delivered?: ResourceBundle;
+}
+
 export interface AgentState extends MovableAgent, HouseAssignableAgent {
   ageTicks: number;
   chromosomes: AgentChromosomes;
@@ -79,6 +96,8 @@ export interface AgentState extends MovableAgent, HouseAssignableAgent {
   traitFlags: string[];
   moods: Record<string, number>;
   brainNodeDuration: number;
+  carriedResources: ResourceBundle;
+  resourceActivity: AgentResourceActivity | null;
 }
 
 interface SimulationRng {
@@ -98,6 +117,7 @@ export interface SimulationState {
   rng: SimulationRng;
   stageCounts: StageCounts;
   nextAgentId: number;
+  nextHouseId: number;
   reproductiveGroups: ReproductiveGroup[];
   nextReproductiveGroupId: number;
   scenarioId: string;
@@ -111,6 +131,13 @@ export interface SimulationConfig {
   seed?: number | string | bigint | null;
   scenarioId?: string | null;
 }
+
+type SnapshotResourceBundle = Record<ResourceType, number>;
+
+const RESOURCE_CARRY_CAPACITY = 6;
+const RESOURCE_GATHER_RATE = 1.5;
+const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
+const RESOURCE_GATHER_NODES = new Set<string>(['AccumulateStock', 'BuildDwelling']);
 
 interface SnapshotBrainSummary {
   brainId: string;
@@ -152,6 +179,8 @@ interface SnapshotAgent {
   reproductiveGroupId: string | null;
   reproductiveGroupRole: string | null;
   parents: string[];
+  carriedResources: SnapshotResourceBundle;
+  resourceActivity: SnapshotAgentResourceActivity | null;
 }
 
 interface SnapshotReproductiveGroupMember {
@@ -165,6 +194,18 @@ interface SnapshotReproductiveGroup {
   members: SnapshotReproductiveGroupMember[];
 }
 
+interface SnapshotAgentResourceActivity {
+  harvested?: SnapshotResourceBundle;
+  delivered?: SnapshotResourceBundle;
+}
+
+interface SnapshotHouseConstruction {
+  active: boolean;
+  progress: number;
+  required: number;
+  cooldownUntil: number;
+}
+
 interface SnapshotHouse {
   id: string;
   x: number;
@@ -174,6 +215,8 @@ interface SnapshotHouse {
   authority: number;
   brain: SnapshotBrainData;
   demand: Record<string, number>;
+  stockpiles: SnapshotResourceBundle;
+  construction: SnapshotHouseConstruction;
 }
 
 interface SnapshotCity {
@@ -185,6 +228,7 @@ interface SnapshotCity {
   brain: SnapshotBrainData;
   demand: Record<string, number>;
   demandExpiresAt: number;
+  stockpiles: SnapshotResourceBundle;
 }
 
 interface SnapshotDecision {
@@ -529,6 +573,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     },
     stageCounts,
     nextAgentId: agents.length,
+    nextHouseId: houses.length,
     reproductiveGroups: [],
     nextReproductiveGroupId: 0,
     scenarioId,
@@ -603,6 +648,8 @@ function createAgents(
       traitFlags: [...traitProfile.traitFlags],
       moods: buildInitialMoodState(traitProfile),
       houseId: null,
+      carriedResources: { wood: 0 },
+      resourceActivity: null,
     });
   }
 
@@ -753,11 +800,338 @@ export function stepSimulationState(simulation: SimulationState): void {
     moveAgent(agent, movementContext, simulation.rng.tick);
   });
 
+  processResourceEconomy(simulation);
+
   stepAging(simulation, {
     onEnterAdulthood: () => matchReproductivePartners(simulation),
   });
 
   simulation.stageCounts = computeStageCounts(simulation.agents);
+}
+
+function processResourceEconomy(simulation: SimulationState): void {
+  if (simulation.agents.length === 0) {
+    return;
+  }
+
+  const houseMap = new Map<string, HouseState>();
+  for (const house of simulation.houses) {
+    if (!house.stockpiles) {
+      house.stockpiles = { wood: 0 };
+    }
+    if (!house.construction) {
+      house.construction = {
+        active: false,
+        progress: 0,
+        required: HOUSE_CONSTRUCTION_COST,
+        cooldownUntil: 0,
+      };
+    }
+    houseMap.set(house.id, house);
+  }
+
+  const agentMap = new Map<string, AgentState>();
+  for (const agent of simulation.agents) {
+    if (!agent.carriedResources) {
+      agent.carriedResources = { wood: 0 };
+    }
+    agent.resourceActivity = null;
+    agentMap.set(agent.id, agent);
+  }
+
+  const newHouses: HouseState[] = [];
+  const city = simulation.city;
+  if (city && !city.stockpiles) {
+    city.stockpiles = { wood: 0 };
+  }
+
+  for (const agent of simulation.agents) {
+    handleAgentResourceActions(simulation, agent, houseMap, city);
+  }
+
+  for (const house of simulation.houses) {
+    maybeCompleteHouseConstruction(simulation, house, newHouses, agentMap);
+  }
+
+  if (newHouses.length > 0) {
+    for (const entry of newHouses) {
+      simulation.houses.push(entry);
+      houseMap.set(entry.id, entry);
+    }
+  }
+}
+
+function handleAgentResourceActions(
+  simulation: SimulationState,
+  agent: AgentState,
+  houseMap: Map<string, HouseState>,
+  city: CityState | null,
+): void {
+  const nodeId = agent.brain.currentNodeId;
+  const canGather = RESOURCE_GATHER_NODES.has(nodeId);
+
+  if (canGather && isForestTile(simulation.world, agent.x, agent.y)) {
+    const carriedWood = sanitizeResourceValue(agent.carriedResources.wood);
+    const capacity = Math.max(0, RESOURCE_CARRY_CAPACITY - carriedWood);
+    if (capacity > 0) {
+      const harvested = harvestForestResource(
+        simulation.world,
+        agent.x,
+        agent.y,
+        Math.min(capacity, RESOURCE_GATHER_RATE),
+      );
+      if (harvested > 0) {
+        agent.carriedResources.wood = carriedWood + harvested;
+        recordAgentResourceActivity(agent, 'harvested', 'wood', harvested);
+      }
+    }
+  }
+
+  const carried = sanitizeResourceValue(agent.carriedResources.wood);
+  if (!canGather || carried <= 0) {
+    return;
+  }
+
+  let delivered = 0;
+  const house = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
+  if (house && canDeliverToHouse(agent, house)) {
+    delivered = carried;
+    applyHouseDelivery(house, delivered);
+  } else if (city && canDeliverToCity(agent, city)) {
+    delivered = carried;
+    applyCityDelivery(city, delivered);
+  }
+
+  if (delivered > 0) {
+    agent.carriedResources.wood = Math.max(0, carried - delivered);
+    recordAgentResourceActivity(agent, 'delivered', 'wood', delivered);
+  }
+}
+
+function canDeliverToHouse(agent: AgentState, house: HouseState): boolean {
+  const dx = agent.x - house.x;
+  const dy = agent.y - house.y;
+  const reach = Math.max(2, house.radius + RESOURCE_DELIVERY_RADIUS_BUFFER);
+  return dx * dx + dy * dy <= reach * reach;
+}
+
+function canDeliverToCity(agent: AgentState, city: CityState): boolean {
+  const dx = agent.x - city.x;
+  const dy = agent.y - city.y;
+  const reach = Math.max(3, city.radius + RESOURCE_DELIVERY_RADIUS_BUFFER);
+  return dx * dx + dy * dy <= reach * reach;
+}
+
+function applyHouseDelivery(house: HouseState, amount: number): void {
+  if (amount <= 0) {
+    return;
+  }
+  if (!house.stockpiles) {
+    house.stockpiles = { wood: 0 };
+  }
+  const current = sanitizeResourceValue(house.stockpiles.wood);
+  house.stockpiles.wood = current + amount;
+  if (!house.construction.active) {
+    house.construction.active = true;
+  }
+  if (house.construction.active) {
+    house.construction.progress = Math.min(
+      house.construction.required,
+      house.construction.progress + amount,
+    );
+  }
+}
+
+function applyCityDelivery(city: CityState, amount: number): void {
+  if (amount <= 0) {
+    return;
+  }
+  if (!city.stockpiles) {
+    city.stockpiles = { wood: 0 };
+  }
+  const current = sanitizeResourceValue(city.stockpiles.wood);
+  city.stockpiles.wood = current + amount;
+}
+
+function recordAgentResourceActivity(
+  agent: AgentState,
+  type: 'harvested' | 'delivered',
+  resource: ResourceType,
+  amount: number,
+): void {
+  if (amount <= 0) {
+    return;
+  }
+  if (!agent.resourceActivity) {
+    agent.resourceActivity = {};
+  }
+  if (type === 'harvested') {
+    const bucket = agent.resourceActivity.harvested ?? (agent.resourceActivity.harvested = {});
+    bucket[resource] = sanitizeResourceValue(bucket[resource]) + amount;
+  } else {
+    const bucket = agent.resourceActivity.delivered ?? (agent.resourceActivity.delivered = {});
+    bucket[resource] = sanitizeResourceValue(bucket[resource]) + amount;
+  }
+}
+
+function maybeCompleteHouseConstruction(
+  simulation: SimulationState,
+  house: HouseState,
+  additions: HouseState[],
+  agentMap: Map<string, AgentState>,
+): void {
+  if (!house.construction) {
+    return;
+  }
+
+  const stockpileWood = sanitizeResourceValue(house.stockpiles.wood);
+  if (!house.construction.active) {
+    if (stockpileWood > 0) {
+      house.construction.active = true;
+      house.construction.progress = Math.min(
+        house.construction.required,
+        Math.max(house.construction.progress, Math.min(stockpileWood, house.construction.required)),
+      );
+    }
+    return;
+  }
+
+  if (house.construction.progress < house.construction.required || stockpileWood < HOUSE_CONSTRUCTION_COST) {
+    house.construction.progress = Math.min(house.construction.progress, stockpileWood);
+    return;
+  }
+
+  if (simulation.tick < house.construction.cooldownUntil) {
+    return;
+  }
+
+  const newHouse = spawnSatelliteHouse(simulation, house, additions);
+  if (!newHouse) {
+    house.construction.cooldownUntil = simulation.tick + HOUSE_CONSTRUCTION_RETRY_DELAY;
+    return;
+  }
+
+  const cost = HOUSE_CONSTRUCTION_COST;
+  house.stockpiles.wood = Math.max(0, stockpileWood - cost);
+  house.construction.progress = 0;
+  house.construction.active = false;
+  house.construction.cooldownUntil = simulation.tick + HOUSE_CONSTRUCTION_COOLDOWN;
+
+  redistributeMembersToNewHouse(simulation, house, newHouse, agentMap);
+  transferStarterResources(house, newHouse);
+  additions.push(newHouse);
+
+  if (house.stockpiles.wood >= cost) {
+    house.construction.active = true;
+    house.construction.progress = Math.min(house.stockpiles.wood, house.construction.required);
+  }
+}
+
+function spawnSatelliteHouse(
+  simulation: SimulationState,
+  parent: HouseState,
+  additions: HouseState[],
+): HouseState | null {
+  const stream = simulation.rng.collectives;
+  const houses = [...simulation.houses, ...additions];
+  const attempts = 10;
+  const baseRadius = Math.max(2.4, parent.radius * 0.75);
+
+  for (let i = 0; i < attempts; i += 1) {
+    const angle = stream.nextFloat() * Math.PI * 2;
+    const distance = parent.radius * (1.4 + stream.nextFloat() * 0.9) + 2.5;
+    const rawX = parent.x + Math.cos(angle) * distance;
+    const rawY = parent.y + Math.sin(angle) * distance;
+    const clamped = clampPosition(simulation.world, rawX, rawY);
+    const radius = Math.max(2.2, baseRadius * (0.8 + stream.nextFloat() * 0.5));
+
+    let collision = false;
+    for (const other of houses) {
+      const dx = other.x - clamped.x;
+      const dy = other.y - clamped.y;
+      const buffer = other.id === parent.id ? parent.radius * 0.5 : Math.max(2, other.radius * 0.4 + radius * 0.3);
+      const minDistance = other.radius + radius + buffer;
+      if (dx * dx + dy * dy < minDistance * minDistance) {
+        collision = true;
+        break;
+      }
+    }
+
+    if (collision) {
+      continue;
+    }
+
+    const id = `house-${simulation.nextHouseId}`;
+    const newHouse = createHouseState(id, clamped.x, clamped.y, radius);
+    simulation.nextHouseId += 1;
+    return newHouse;
+  }
+
+  return null;
+}
+
+function redistributeMembersToNewHouse(
+  simulation: SimulationState,
+  parent: HouseState,
+  child: HouseState,
+  agentMap: Map<string, AgentState>,
+): void {
+  const parentMembers = parent.members.slice();
+  if (parentMembers.length === 0) {
+    child.members = [];
+    return;
+  }
+
+  const moveCount = Math.max(1, Math.floor(parentMembers.length * 0.25));
+  const moved: string[] = [];
+
+  for (const memberId of parentMembers) {
+    if (moved.length >= moveCount) {
+      break;
+    }
+    const agent = agentMap.get(memberId);
+    if (!agent) {
+      continue;
+    }
+    moved.push(memberId);
+    agent.houseId = child.id;
+    const jitterAngle = simulation.rng.collectives.nextFloat() * Math.PI * 2;
+    const jitterRadius = child.radius * (0.2 + simulation.rng.collectives.nextFloat() * 0.4);
+    const targetX = child.x + Math.cos(jitterAngle) * jitterRadius;
+    const targetY = child.y + Math.sin(jitterAngle) * jitterRadius;
+    const clamped = clampPosition(simulation.world, targetX, targetY);
+    agent.homeX = clamped.x;
+    agent.homeY = clamped.y;
+    agent.x = clamped.x;
+    agent.y = clamped.y;
+  }
+
+  if (moved.length === 0) {
+    child.members = [];
+    return;
+  }
+
+  const movedSet = new Set(moved);
+  parent.members = parent.members.filter((id) => !movedSet.has(id));
+  child.members = moved;
+}
+
+function transferStarterResources(parent: HouseState, child: HouseState): void {
+  const available = sanitizeResourceValue(parent.stockpiles.wood);
+  if (available <= 0) {
+    child.stockpiles.wood = sanitizeResourceValue(child.stockpiles.wood);
+    return;
+  }
+  const starter = Math.min(2, available);
+  parent.stockpiles.wood = available - starter;
+  child.stockpiles.wood = sanitizeResourceValue(child.stockpiles.wood) + starter;
+}
+
+function sanitizeResourceValue(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return value < 0 ? 0 : value;
 }
 
 const SAFE_NUMBER_MASK = BigInt('0x1fffffffffffff');
@@ -818,6 +1192,8 @@ function createSnapshotAgent(agent: AgentState): SnapshotAgent {
     reproductiveGroupId: agent.reproductiveGroupId,
     reproductiveGroupRole: agent.reproductiveGroupRole,
     parents: [...agent.parents],
+    carriedResources: cloneResourceBundle(agent.carriedResources),
+    resourceActivity: cloneAgentResourceActivity(agent.resourceActivity),
   };
 }
 
@@ -839,6 +1215,8 @@ function createSnapshotHouse(house: HouseState): SnapshotHouse {
     authority: 0,
     brain: createBrainSnapshot(house.brain, house.brainNodeDuration, house.brainDecision),
     demand: { ...house.activeDemand },
+    stockpiles: cloneResourceBundle(house.stockpiles),
+    construction: cloneHouseConstruction(house.construction),
   };
 }
 
@@ -852,6 +1230,7 @@ function createSnapshotCity(city: CityState): SnapshotCity {
     brain: createBrainSnapshot(city.brain, city.brainNodeDuration, city.brainDecision),
     demand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
+    stockpiles: cloneResourceBundle(city.stockpiles),
   };
 }
 
@@ -892,6 +1271,70 @@ function createBrainSnapshot(
       tags: [...metadata.tags],
     },
     state: serializeBrainState(brain),
+  };
+}
+
+function cloneResourceBundle(bundle: ResourceBundle | null | undefined): SnapshotResourceBundle {
+  const clone: SnapshotResourceBundle = {};
+  if (!bundle) {
+    return clone;
+  }
+  for (const [key, value] of Object.entries(bundle)) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      continue;
+    }
+    clone[key as ResourceType] = Math.max(0, numeric);
+  }
+  return clone;
+}
+
+function cloneAgentResourceActivity(
+  activity: AgentResourceActivity | null,
+): SnapshotAgentResourceActivity | null {
+  if (!activity) {
+    return null;
+  }
+
+  const harvested = activity.harvested ? cloneResourceBundle(activity.harvested) : null;
+  const delivered = activity.delivered ? cloneResourceBundle(activity.delivered) : null;
+
+  const hasHarvested = harvested && Object.keys(harvested).length > 0;
+  const hasDelivered = delivered && Object.keys(delivered).length > 0;
+
+  if (!hasHarvested && !hasDelivered) {
+    return null;
+  }
+
+  const clone: SnapshotAgentResourceActivity = {};
+  if (hasHarvested && harvested) {
+    clone.harvested = harvested;
+  }
+  if (hasDelivered && delivered) {
+    clone.delivered = delivered;
+  }
+  return clone;
+}
+
+function cloneHouseConstruction(construction: HouseState['construction']): SnapshotHouseConstruction {
+  if (!construction) {
+    return {
+      active: false,
+      progress: 0,
+      required: HOUSE_CONSTRUCTION_COST,
+      cooldownUntil: 0,
+    };
+  }
+  const progress = Number.isFinite(construction.progress) ? Math.max(0, construction.progress) : 0;
+  const required = Number.isFinite(construction.required)
+    ? Math.max(1, construction.required)
+    : HOUSE_CONSTRUCTION_COST;
+  const cooldown = Number.isFinite(construction.cooldownUntil) ? construction.cooldownUntil : 0;
+  return {
+    active: Boolean(construction.active),
+    progress,
+    required,
+    cooldownUntil: cooldown,
   };
 }
 

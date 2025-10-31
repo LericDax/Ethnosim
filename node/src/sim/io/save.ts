@@ -4,7 +4,13 @@ import type { BrainDecision } from '../engine/brain.ts';
 import type { SerializedSeededRng, SerializedRngStream } from '../engine/rng.ts';
 import type { WorldState } from '../engine/world.ts';
 import type { AgentState, PregnancyState } from '../sim.worker.ts';
-import type { CityState, HouseState } from '../engine/collectives.ts';
+import {
+  HOUSE_CONSTRUCTION_COST,
+  type CityState,
+  type HouseState,
+  type ResourceBundle,
+  type ResourceType,
+} from '../engine/collectives.ts';
 import {
   cloneAgentChromosomes,
   cloneChromosomeRegistry,
@@ -44,6 +50,8 @@ export interface SerializedAgentState {
   traitFlags: string[];
   moods: Record<string, number>;
   houseId: string | null;
+  carriedResources: AgentState['carriedResources'];
+  resourceActivity: AgentState['resourceActivity'];
 }
 
 export interface SerializedReproductiveGroup {
@@ -62,6 +70,8 @@ export interface SerializedHouseState {
   brainDecision: BrainDecision | null;
   members: string[];
   activeDemand: Record<string, number>;
+  stockpiles: HouseState['stockpiles'];
+  construction: HouseState['construction'];
 }
 
 export interface SerializedCityState {
@@ -74,6 +84,7 @@ export interface SerializedCityState {
   brainDecision: BrainDecision | null;
   activeDemand: Record<string, number>;
   demandExpiresAt: number;
+  stockpiles: CityState['stockpiles'];
 }
 
 export interface SerializedTerrainLayer {
@@ -89,6 +100,8 @@ export interface SerializedWorldState {
   centerY: number;
   climateSeed: number;
   terrain: SerializedTerrainLayer;
+  forestResources: number[];
+  forestResourceCapacity: number;
 }
 
 export interface SerializedSimulationRng {
@@ -113,6 +126,7 @@ export interface SerializedSimulationState {
   rng: SerializedSimulationRng;
   stageCounts: SimulationState['stageCounts'];
   nextAgentId: number;
+  nextHouseId: number;
   reproductiveGroups: SerializedReproductiveGroup[];
   nextReproductiveGroupId: number;
   chromosomes: ChromosomeRegistry;
@@ -140,6 +154,7 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     rng: serializeRng(state),
     stageCounts: { ...state.stageCounts },
     nextAgentId: state.nextAgentId,
+    nextHouseId: state.nextHouseId,
     reproductiveGroups: state.reproductiveGroups.map((group) => serializeReproductiveGroup(group)),
     nextReproductiveGroupId: state.nextReproductiveGroupId,
     chromosomes: cloneChromosomeRegistry(state.chromosomeRegistry),
@@ -175,6 +190,8 @@ function serializeWorld(world: WorldState): SerializedWorldState {
       height: world.terrain.height,
       tiles: [...world.terrain.tiles],
     },
+    forestResources: Array.from(world.forestResources),
+    forestResourceCapacity: world.forestResourceCapacity,
   };
 }
 
@@ -207,6 +224,8 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     traitFlags: [...agent.traitFlags],
     moods: { ...agent.moods },
     houseId: agent.houseId ?? null,
+    carriedResources: cloneResourceBundle(agent.carriedResources),
+    resourceActivity: cloneAgentResourceActivity(agent.resourceActivity),
   };
 }
 
@@ -229,6 +248,13 @@ function serializeHouse(house: HouseState): SerializedHouseState {
     brainDecision: cloneBrainDecision(house.brainDecision),
     members: [...house.members],
     activeDemand: { ...house.activeDemand },
+    stockpiles: cloneResourceBundle(house.stockpiles),
+    construction: {
+      active: Boolean(house.construction?.active),
+      progress: house.construction?.progress ?? 0,
+      required: house.construction?.required ?? HOUSE_CONSTRUCTION_COST,
+      cooldownUntil: house.construction?.cooldownUntil ?? 0,
+    },
   };
 }
 
@@ -243,7 +269,49 @@ function serializeCity(city: CityState): SerializedCityState {
     brainDecision: cloneBrainDecision(city.brainDecision),
     activeDemand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
+    stockpiles: cloneResourceBundle(city.stockpiles),
   };
+}
+
+function cloneResourceBundle(bundle: ResourceBundle | null | undefined): ResourceBundle {
+  const clone: ResourceBundle = {};
+  if (!bundle) {
+    return clone;
+  }
+  for (const [key, value] of Object.entries(bundle)) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      continue;
+    }
+    clone[key as ResourceType] = Math.max(0, numeric);
+  }
+  return clone;
+}
+
+function cloneAgentResourceActivity(
+  activity: AgentState['resourceActivity'],
+): AgentState['resourceActivity'] {
+  if (!activity) {
+    return null;
+  }
+
+  const harvested = activity.harvested ? cloneResourceBundle(activity.harvested) : undefined;
+  const delivered = activity.delivered ? cloneResourceBundle(activity.delivered) : undefined;
+  const hasHarvested = harvested && Object.keys(harvested).length > 0;
+  const hasDelivered = delivered && Object.keys(delivered).length > 0;
+
+  if (!hasHarvested && !hasDelivered) {
+    return null;
+  }
+
+  const clone: AgentState['resourceActivity'] = {};
+  if (hasHarvested && harvested) {
+    clone.harvested = harvested;
+  }
+  if (hasDelivered && delivered) {
+    clone.delivered = delivered;
+  }
+  return clone;
 }
 
 function serializeRng(state: SimulationState): SerializedSimulationRng {

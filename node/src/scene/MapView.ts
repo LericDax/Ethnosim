@@ -36,6 +36,11 @@ export interface SnapshotAgent {
   y: number;
   lifeStage: 'baby' | 'child' | 'teen' | 'adult';
   brain?: SnapshotBrainData;
+  carriedResources?: Record<string, number>;
+  resourceActivity?: {
+    harvested?: Record<string, number>;
+    delivered?: Record<string, number>;
+  } | null;
 }
 
 export interface Snapshot {
@@ -57,6 +62,13 @@ export interface SnapshotHouse {
   authority: number;
   brain: SnapshotBrainData;
   demand: Record<string, number>;
+  stockpiles?: Record<string, number>;
+  construction?: {
+    active?: boolean;
+    progress?: number;
+    required?: number;
+    cooldownUntil?: number;
+  } | null;
 }
 
 export interface SnapshotCity {
@@ -68,6 +80,7 @@ export interface SnapshotCity {
   brain: SnapshotBrainData;
   demand: Record<string, number>;
   demandExpiresAt: number;
+  stockpiles?: Record<string, number>;
 }
 
 export interface SnapshotBrainData {

@@ -1,6 +1,12 @@
 import type { SimulationState, AgentState } from '../sim.worker.ts';
 import type { WorldState } from '../engine/world.ts';
-import type { CityState, HouseState } from '../engine/collectives.ts';
+import {
+  HOUSE_CONSTRUCTION_COST,
+  type CityState,
+  type HouseState,
+  type ResourceBundle,
+  type ResourceType,
+} from '../engine/collectives.ts';
 import { restoreSeededRng } from '../engine/rng.ts';
 import { cloneBrainDecision, restoreBrainState } from '../engine/brain.ts';
 import {
@@ -62,6 +68,8 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
   const nextReproductiveGroupId =
     (serialized as Partial<SerializedSimulationState>).nextReproductiveGroupId ??
     inferNextReproductiveGroupId(reproductiveGroups);
+  const nextHouseId =
+    (serialized as Partial<SerializedSimulationState>).nextHouseId ?? inferNextHouseId(houses);
 
   const simulation: SimulationState = {
     tick: serialized.tick,
@@ -78,6 +86,7 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
     },
     stageCounts: { ...serialized.stageCounts },
     nextAgentId: serialized.nextAgentId,
+    nextHouseId,
     reproductiveGroups,
     nextReproductiveGroupId,
     scenarioId: serialized.scenarioId,
@@ -91,6 +100,17 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
 }
 
 function restoreWorld(serialized: SerializedWorldState): WorldState {
+  const capacity = Number.isFinite(serialized.forestResourceCapacity)
+    ? serialized.forestResourceCapacity
+    : 12;
+  const totalTiles = serialized.width * serialized.height;
+  let forestResources: Float32Array;
+  if (Array.isArray(serialized.forestResources) && serialized.forestResources.length === totalTiles) {
+    forestResources = new Float32Array(serialized.forestResources);
+  } else {
+    forestResources = new Float32Array(totalTiles);
+    forestResources.fill(capacity * 0.5);
+  }
   return {
     width: serialized.width,
     height: serialized.height,
@@ -102,6 +122,8 @@ function restoreWorld(serialized: SerializedWorldState): WorldState {
       height: serialized.terrain.height,
       tiles: [...serialized.terrain.tiles],
     },
+    forestResources,
+    forestResourceCapacity: capacity,
   };
 }
 
@@ -154,6 +176,8 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     traitFlags: [...serialized.traitFlags],
     moods: { ...serialized.moods },
     houseId: serialized.houseId,
+    carriedResources: cloneResourceBundle(serialized.carriedResources),
+    resourceActivity: cloneAgentResourceActivity(serialized.resourceActivity),
   };
 }
 
@@ -180,6 +204,21 @@ function inferNextReproductiveGroupId(groups: ReproductiveGroup[]): number {
   return max + 1;
 }
 
+function inferNextHouseId(houses: HouseState[]): number {
+  let max = -1;
+  for (const house of houses) {
+    const match = /^(?:.*?)(\d+)$/.exec(house.id);
+    if (!match) {
+      continue;
+    }
+    const value = Number.parseInt(match[1], 10);
+    if (Number.isFinite(value) && value > max) {
+      max = value;
+    }
+  }
+  return max + 1;
+}
+
 function restoreHouse(serialized: SerializedHouseState): HouseState {
   return {
     id: serialized.id,
@@ -191,6 +230,8 @@ function restoreHouse(serialized: SerializedHouseState): HouseState {
     brainDecision: cloneBrainDecision(serialized.brainDecision),
     members: [...serialized.members],
     activeDemand: { ...serialized.activeDemand },
+    stockpiles: cloneResourceBundle(serialized.stockpiles),
+    construction: restoreHouseConstruction(serialized.construction),
   };
 }
 
@@ -205,6 +246,69 @@ function restoreCity(serialized: SerializedCityState): CityState {
     brainDecision: cloneBrainDecision(serialized.brainDecision),
     activeDemand: { ...serialized.activeDemand },
     demandExpiresAt: serialized.demandExpiresAt,
+    stockpiles: cloneResourceBundle(serialized.stockpiles),
+  };
+}
+
+function cloneResourceBundle(bundle: ResourceBundle | null | undefined): ResourceBundle {
+  const clone: ResourceBundle = {};
+  if (!bundle) {
+    return clone;
+  }
+  for (const [key, value] of Object.entries(bundle)) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      continue;
+    }
+    clone[key as ResourceType] = Math.max(0, numeric);
+  }
+  return clone;
+}
+
+function cloneAgentResourceActivity(
+  activity: AgentState['resourceActivity'] | null | undefined,
+): AgentState['resourceActivity'] {
+  if (!activity) {
+    return null;
+  }
+  const harvested = activity.harvested ? cloneResourceBundle(activity.harvested) : undefined;
+  const delivered = activity.delivered ? cloneResourceBundle(activity.delivered) : undefined;
+  const hasHarvested = harvested && Object.keys(harvested).length > 0;
+  const hasDelivered = delivered && Object.keys(delivered).length > 0;
+  if (!hasHarvested && !hasDelivered) {
+    return null;
+  }
+  const clone: AgentState['resourceActivity'] = {};
+  if (hasHarvested && harvested) {
+    clone.harvested = harvested;
+  }
+  if (hasDelivered && delivered) {
+    clone.delivered = delivered;
+  }
+  return clone;
+}
+
+function restoreHouseConstruction(
+  serialized: SerializedHouseState['construction'] | null | undefined,
+): HouseState['construction'] {
+  if (!serialized) {
+    return {
+      active: false,
+      progress: 0,
+      required: HOUSE_CONSTRUCTION_COST,
+      cooldownUntil: 0,
+    };
+  }
+  const progress = Number.isFinite(serialized.progress) ? Math.max(0, serialized.progress) : 0;
+  const required = Number.isFinite(serialized.required)
+    ? Math.max(1, serialized.required)
+    : HOUSE_CONSTRUCTION_COST;
+  const cooldown = Number.isFinite(serialized.cooldownUntil) ? serialized.cooldownUntil : 0;
+  return {
+    active: Boolean(serialized.active),
+    progress,
+    required,
+    cooldownUntil: cooldown,
   };
 }
 

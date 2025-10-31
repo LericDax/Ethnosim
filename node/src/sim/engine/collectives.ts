@@ -13,6 +13,21 @@ const HOUSE_NODE_DURATION = 12;
 const CITY_MIND_ID = 'UrbanMind_v1';
 const CITY_RADIUS_FACTOR = 0.35;
 
+export type ResourceType = 'wood';
+
+export type ResourceBundle = Partial<Record<ResourceType, number>>;
+
+export interface HouseConstructionState {
+  active: boolean;
+  progress: number;
+  required: number;
+  cooldownUntil: number;
+}
+
+export const HOUSE_CONSTRUCTION_COST = 24;
+export const HOUSE_CONSTRUCTION_RETRY_DELAY = 12;
+export const HOUSE_CONSTRUCTION_COOLDOWN = 24;
+
 type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
 interface HouseDemandTemplate {
@@ -92,6 +107,8 @@ export interface HouseState {
   brainDecision: BrainDecision | null;
   members: string[];
   activeDemand: Record<string, number>;
+  stockpiles: ResourceBundle;
+  construction: HouseConstructionState;
 }
 
 interface CityDemandTemplate {
@@ -164,6 +181,7 @@ export interface CityState {
   brainDecision: BrainDecision | null;
   activeDemand: Record<string, number>;
   demandExpiresAt: number;
+  stockpiles: ResourceBundle;
 }
 
 interface HouseSpawnOptions {
@@ -196,24 +214,34 @@ export function createInitialHouses(options: HouseSpawnOptions): HouseState[] {
     const x = clamp(centerX + Math.cos(angle) * offsetRadius, 0, width);
     const y = clamp(centerY + Math.sin(angle) * offsetRadius, 0, height);
     const radius = maxRadius * (0.6 + rng.nextFloat() * 0.6);
-
-    const brain = createBrainState(HOUSE_MIND_ID);
-
-    houses.push({
-      id: `house-${i}`,
-      x,
-      y,
-      radius,
-      brain,
-      brainNodeDuration: HOUSE_NODE_DURATION,
-      brainDecision: null,
-      members: [],
-      activeDemand: {},
-    });
+    houses.push(createHouseState(`house-${i}`, x, y, radius));
   }
 
   assignAgentsToHouses(houses, agents);
   return houses;
+}
+
+export function createHouseState(id: string, x: number, y: number, radius: number): HouseState {
+  const brain = createBrainState(HOUSE_MIND_ID);
+
+  return {
+    id,
+    x,
+    y,
+    radius,
+    brain,
+    brainNodeDuration: HOUSE_NODE_DURATION,
+    brainDecision: null,
+    members: [],
+    activeDemand: {},
+    stockpiles: { wood: 0 },
+    construction: {
+      active: false,
+      progress: 0,
+      required: HOUSE_CONSTRUCTION_COST,
+      cooldownUntil: 0,
+    },
+  };
 }
 
 export function createUrbanCenter(options: CitySpawnOptions): CityState {
@@ -242,6 +270,7 @@ export function createUrbanCenter(options: CitySpawnOptions): CityState {
     brainDecision: null,
     activeDemand,
     demandExpiresAt: duration,
+    stockpiles: { wood: 0 },
   };
 }
 
