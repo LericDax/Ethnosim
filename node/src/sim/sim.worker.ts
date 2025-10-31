@@ -158,6 +158,12 @@ interface SnapshotCity {
   demandExpiresAt: number;
 }
 
+interface SnapshotDecision {
+  agent_id: string;
+  from: string;
+  to: string;
+}
+
 type DemandScope = 'agent' | 'house' | 'city' | 'terrain';
 
 interface SnapshotDemand {
@@ -182,6 +188,7 @@ export interface Snapshot {
   houses: SnapshotHouse[];
   city: SnapshotCity | null;
   demands: SnapshotDemand[];
+  decisions: SnapshotDecision[];
   stats: StageCounts;
 }
 
@@ -221,6 +228,11 @@ interface WorkerRequestSnapshotMessage {
   type: 'REQUEST_SNAPSHOT';
 }
 
+interface WorkerTrackAgentMessage {
+  type: 'TRACK_AGENT';
+  id: string | null;
+}
+
 type WorkerMessage =
   | WorkerInitMessage
   | WorkerStopMessage
@@ -228,7 +240,8 @@ type WorkerMessage =
   | WorkerResumeMessage
   | WorkerSetTickIntervalMessage
   | WorkerSetTicksPerUpdateMessage
-  | WorkerRequestSnapshotMessage;
+  | WorkerRequestSnapshotMessage
+  | WorkerTrackAgentMessage;
 
 interface WorkerContext {
   postMessage: (data: unknown) => void;
@@ -247,6 +260,15 @@ let state: SimulationState | null = null;
 let isPaused = false;
 let tickIntervalMs = 500;
 let ticksPerUpdate = 1;
+let trackedAgentId: string | null = null;
+let trackedAgentDecision: BrainDecision | null = null;
+
+interface TrackedTransition {
+  from: string;
+  to: string;
+}
+
+let trackedAgentTransition: TrackedTransition | null = null;
 
 if (workerContext) {
   workerContext.addEventListener('message', (event) => {
@@ -276,6 +298,9 @@ if (workerContext) {
         break;
       case 'REQUEST_SNAPSHOT':
         postSnapshot();
+        break;
+      case 'TRACK_AGENT':
+        trackAgent(message.id);
         break;
       default:
         break;
@@ -314,6 +339,9 @@ function stopSimulation(): void {
   }
   state = null;
   isPaused = false;
+  trackedAgentId = null;
+  trackedAgentDecision = null;
+  trackedAgentTransition = null;
 }
 
 function postSnapshot(): void {
@@ -321,6 +349,32 @@ function postSnapshot(): void {
     return;
   }
   workerContext.postMessage(createSnapshot(state));
+}
+
+function trackAgent(id: string | null): void {
+  if (typeof id === 'string' && id.trim().length > 0) {
+    trackedAgentId = id;
+  } else {
+    trackedAgentId = null;
+  }
+  trackedAgentDecision = null;
+  trackedAgentTransition = null;
+
+  if (trackedAgentId && state) {
+    const agent = state.agents.find((entry) => entry.id === trackedAgentId) ?? null;
+    if (!agent) {
+      trackedAgentId = null;
+      return;
+    }
+
+    if (agent.brainDecision) {
+      trackedAgentDecision = cloneBrainDecision(agent.brainDecision);
+      trackedAgentTransition = {
+        from: agent.brainDecision.fromNodeId,
+        to: agent.brainDecision.chosenNodeId,
+      };
+    }
+  }
 }
 
 function scheduleTickLoop(): void {
@@ -610,11 +664,38 @@ export function stepSimulationState(simulation: SimulationState): void {
   assignAgentsToHouses(simulation.houses, simulation.agents);
   updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick);
 
+  let trackedAgentFound = false;
+
   simulation.agents.forEach((agent) => {
+    const wasTrackedAgent = trackedAgentId === agent.id;
+    const previousNodeId = agent.brain.currentNodeId;
     const brainResult = tickBrain(agent.brain, agent.brainMultipliers, agent.moods);
     agent.brainNodeDuration = brainResult.nodeDuration;
     agent.brainDecision = brainResult.decision;
+
+    if (wasTrackedAgent) {
+      trackedAgentFound = true;
+      const currentNodeId = agent.brain.currentNodeId;
+      if (brainResult.decision && previousNodeId !== currentNodeId) {
+        trackedAgentDecision = cloneBrainDecision(brainResult.decision);
+        trackedAgentTransition = {
+          from: previousNodeId,
+          to: currentNodeId,
+        };
+      } else if (!trackedAgentDecision && brainResult.decision) {
+        trackedAgentDecision = cloneBrainDecision(brainResult.decision);
+        trackedAgentTransition = {
+          from: brainResult.decision.fromNodeId,
+          to: brainResult.decision.chosenNodeId,
+        };
+      }
+    }
   });
+
+  if (trackedAgentId && !trackedAgentFound) {
+    trackedAgentDecision = null;
+    trackedAgentTransition = null;
+  }
 
   const agentsById = new Map<string, AgentState>();
   simulation.agents.forEach((agent) => {
@@ -659,6 +740,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
     houses: simulation.houses.map((house) => createSnapshotHouse(house)),
     city: simulation.city ? createSnapshotCity(simulation.city) : null,
     demands: [],
+    decisions: createSnapshotDecisions(simulation),
     stats: { ...simulation.stageCounts },
   };
 }
@@ -712,6 +794,25 @@ function createSnapshotCity(city: CityState): SnapshotCity {
     demand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
   };
+}
+
+function createSnapshotDecisions(simulation: SimulationState): SnapshotDecision[] {
+  if (!trackedAgentId || !trackedAgentDecision || !trackedAgentTransition) {
+    return [];
+  }
+
+  const isAgentPresent = simulation.agents.some((agent) => agent.id === trackedAgentId);
+  if (!isAgentPresent) {
+    return [];
+  }
+
+  return [
+    {
+      agent_id: trackedAgentId,
+      from: trackedAgentTransition.from,
+      to: trackedAgentTransition.to,
+    },
+  ];
 }
 
 function createBrainSnapshot(
