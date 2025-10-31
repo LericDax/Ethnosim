@@ -153,6 +153,17 @@ const RESOURCE_GATHER_RATE = 1.5;
 const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
 const RESOURCE_GATHER_NODES = new Set<string>(['AccumulateStock', 'BuildDwelling']);
 
+interface SnapshotBrainTransitionTiming {
+  durationTicks: number;
+  remainingTicks: number;
+  elapsedTicks: number;
+  startedAtTick: number;
+  updatedAtTick: number;
+  tickIntervalMs: number;
+  ticksPerUpdate: number;
+  tickDurationMs: number;
+}
+
 interface SnapshotBrainSummary {
   brainId: string;
   nodeId: string;
@@ -162,6 +173,7 @@ interface SnapshotBrainSummary {
   traitFlags: string[];
   baseFrequency: number;
   tags: string[];
+  transition: SnapshotBrainTransitionTiming | null;
 }
 
 interface SnapshotBrainData {
@@ -1237,9 +1249,9 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
       w: simulation.world.width,
       h: simulation.world.height,
     },
-    agents: simulation.agents.map((agent) => createSnapshotAgent(agent)),
-    houses: simulation.houses.map((house) => createSnapshotHouse(house)),
-    city: simulation.city ? createSnapshotCity(simulation.city) : null,
+    agents: simulation.agents.map((agent) => createSnapshotAgent(agent, simulation.tick)),
+    houses: simulation.houses.map((house) => createSnapshotHouse(house, simulation.tick)),
+    city: simulation.city ? createSnapshotCity(simulation.city, simulation.tick) : null,
     demands: [],
     decisions: createSnapshotDecisions(simulation),
     stats: { ...simulation.stageCounts },
@@ -1251,7 +1263,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
   };
 }
 
-function createSnapshotAgent(agent: AgentState): SnapshotAgent {
+function createSnapshotAgent(agent: AgentState, currentTick: number): SnapshotAgent {
   return {
     id: agent.id,
     x: agent.x,
@@ -1259,7 +1271,7 @@ function createSnapshotAgent(agent: AgentState): SnapshotAgent {
     lifeStage: agent.lifeStage,
     ageStage: agent.lifeStage,
     brainNode: agent.brain.currentNodeId,
-    brain: createBrainSnapshot(agent.brain, agent.brainNodeDuration, agent.brainDecision),
+    brain: createBrainSnapshot(agent.brain, agent.brainNodeDuration, agent.brainDecision, currentTick),
     houseId: agent.houseId ?? null,
     pregnant: Boolean(agent.pregnancy),
     fertility: agent.fertility,
@@ -1289,7 +1301,7 @@ function createSnapshotReproductiveGroup(group: ReproductiveGroup): SnapshotRepr
   };
 }
 
-function createSnapshotHouse(house: HouseState): SnapshotHouse {
+function createSnapshotHouse(house: HouseState, currentTick: number): SnapshotHouse {
   return {
     id: house.id,
     x: house.x,
@@ -1297,7 +1309,7 @@ function createSnapshotHouse(house: HouseState): SnapshotHouse {
     radius: house.radius,
     members: [...house.members],
     authority: 0,
-    brain: createBrainSnapshot(house.brain, house.brainNodeDuration, house.brainDecision),
+    brain: createBrainSnapshot(house.brain, house.brainNodeDuration, house.brainDecision, currentTick),
     demand: { ...house.activeDemand },
     stockpiles: cloneResourceBundle(house.stockpiles),
     construction: cloneHouseConstruction(house.construction),
@@ -1307,14 +1319,14 @@ function createSnapshotHouse(house: HouseState): SnapshotHouse {
   };
 }
 
-function createSnapshotCity(city: CityState): SnapshotCity {
+function createSnapshotCity(city: CityState, currentTick: number): SnapshotCity {
   return {
     id: city.id,
     x: city.x,
     y: city.y,
     radius: city.radius,
     authority: 0,
-    brain: createBrainSnapshot(city.brain, city.brainNodeDuration, city.brainDecision),
+    brain: createBrainSnapshot(city.brain, city.brainNodeDuration, city.brainDecision, currentTick),
     demand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
     stockpiles: cloneResourceBundle(city.stockpiles),
@@ -1370,12 +1382,34 @@ function createSnapshotDecisions(simulation: SimulationState): SnapshotDecision[
   ];
 }
 
+function computeEffectiveTickDurationMs(): number {
+  const interval = Number.isFinite(tickIntervalMs) ? tickIntervalMs : 500;
+  const ticks = Number.isFinite(ticksPerUpdate) && ticksPerUpdate > 0 ? ticksPerUpdate : 1;
+  return interval / ticks;
+}
+
 function createBrainSnapshot(
   brain: BrainState,
   nodeDuration: number,
   decision: BrainDecision | null,
+  currentTick: number,
 ): SnapshotBrainData {
   const metadata = getCurrentNodeMetadata(brain);
+  const durationTicks = Number.isFinite(nodeDuration) && nodeDuration > 0 ? nodeDuration : metadata.duration;
+  const remainingTicks = Number.isFinite(brain.nodeTimer) ? Math.max(0, brain.nodeTimer) : durationTicks;
+  const safeDurationTicks = durationTicks > 0 ? durationTicks : 1;
+  const elapsedTicks = Math.max(0, safeDurationTicks - Math.min(remainingTicks, safeDurationTicks));
+  const tickDurationMs = computeEffectiveTickDurationMs();
+  const transition: SnapshotBrainTransitionTiming = {
+    durationTicks: safeDurationTicks,
+    remainingTicks,
+    elapsedTicks,
+    startedAtTick: Math.max(0, currentTick - elapsedTicks),
+    updatedAtTick: currentTick,
+    tickIntervalMs,
+    ticksPerUpdate,
+    tickDurationMs,
+  };
   return {
     summary: {
       brainId: brain.brainId,
@@ -1386,6 +1420,7 @@ function createBrainSnapshot(
       traitFlags: [...brain.traitFlags],
       baseFrequency: metadata.baseFrequency,
       tags: [...metadata.tags],
+      transition,
     },
     state: serializeBrainState(brain),
   };

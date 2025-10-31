@@ -268,6 +268,9 @@ export class HUD {
         this.pauseButton.textContent = 'Resume';
       }
       this.worker.postMessage({ type: 'REQUEST_SNAPSHOT' });
+      if (this.inspector && typeof this.inspector.setPaused === 'function') {
+        this.inspector.setPaused(this._isPaused);
+      }
     });
 
     wrapper.appendChild(this.pauseButton);

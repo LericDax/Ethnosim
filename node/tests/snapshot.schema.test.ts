@@ -31,6 +31,11 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof agent.brain.summary.nodeId).toBe('string');
     expect(typeof agent.brain.summary.nodeTimer).toBe('number');
     expect(typeof agent.brain.summary.nodeDuration).toBe('number');
+    expect(agent.brain.summary.transition).toBeTruthy();
+    expect(typeof agent.brain.summary.transition.durationTicks).toBe('number');
+    expect(typeof agent.brain.summary.transition.remainingTicks).toBe('number');
+    expect(typeof agent.brain.summary.transition.elapsedTicks).toBe('number');
+    expect(typeof agent.brain.summary.transition.tickDurationMs).toBe('number');
     expect(Array.isArray(agent.brain.summary.traitFlags)).toBe(true);
     expect(Array.isArray(agent.brain.summary.tags)).toBe(true);
     expect(agent.brain.state.brainId).toBe(agent.brain.summary.brainId);
@@ -51,6 +56,7 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(Array.isArray(house.members)).toBe(true);
     expect(typeof house.authority).toBe('number');
     expect(house.brain.summary.brainId).toBeTruthy();
+    expect(house.brain.summary.transition).toBeTruthy();
   }
 
   if (snapshot.city) {
@@ -58,6 +64,7 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof snapshot.city.authority).toBe('number');
     expect(snapshot.city.brain.summary.brainId).toBeTruthy();
     expect(typeof snapshot.city.demandExpiresAt).toBe('number');
+    expect(snapshot.city.brain.summary.transition).toBeTruthy();
   }
 
   for (const decision of snapshot.decisions) {

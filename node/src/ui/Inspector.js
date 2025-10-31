@@ -262,6 +262,12 @@ export class Inspector {
     this.container.appendChild(this.root);
   }
 
+  setPaused(isPaused) {
+    if (this.brainViewer && typeof this.brainViewer.setPaused === 'function') {
+      this.brainViewer.setPaused(isPaused);
+    }
+  }
+
   setAgent(agent) {
     if (!agent) {
       this.setSelection(null);
@@ -640,6 +646,7 @@ export class Inspector {
       edges: graph.edges.map((edge) => ({ ...edge })),
       currentNodeId,
       decision,
+      transition: summary?.transition ?? null,
     });
     this.brainSection.root.style.display = 'flex';
   }
