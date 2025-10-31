@@ -143,11 +143,14 @@ export class HUD {
     Object.assign(this.host.style, {
       position: 'fixed',
       top: '16px',
+      bottom: '16px',
       left: '16px',
       display: 'flex',
       flexDirection: 'column',
       gap: '12px',
       alignItems: 'stretch',
+      overflowY: 'auto',
+      paddingRight: '8px',
       zIndex: '100',
     });
   }
@@ -163,6 +166,7 @@ export class HUD {
       boxShadow: '0 10px 30px rgba(2, 6, 23, 0.4)',
       minWidth: '240px',
       pointerEvents: 'auto',
+      flex: '0 0 auto',
     });
   }
 
