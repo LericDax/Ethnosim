@@ -14,6 +14,25 @@ const PARTICLE_COLOR = 'rgba(125, 211, 252, 0.82)';
 const GRID_COLOR = 'rgba(15, 118, 110, 0.08)';
 const GRID_STEP = 14;
 
+const PARTICLE_BASE_OPACITY = 0.58;
+const PARTICLE_OPACITY_RANGE = 0.38;
+const PARTICLE_MIN_OPACITY = 0.12;
+const PARTICLE_MAX_OPACITY = 0.98;
+const PARTICLE_BASE_SIZE = 3.1;
+const PARTICLE_SIZE_RANGE = 3.6;
+const PARTICLE_MIN_SIZE = 2.4;
+
+const PULSE_FAMILY_THEMES = {
+  default: Object.freeze({ family: 'default', color: PARTICLE_COLOR, glowColor: 'rgba(125, 211, 252, 0.42)' }),
+  empathy: Object.freeze({ family: 'empathy', color: '#7dd3fc', glowColor: 'rgba(125, 211, 252, 0.4)' }),
+  vital: Object.freeze({ family: 'vital', color: '#fde047', glowColor: 'rgba(253, 224, 71, 0.38)' }),
+  calm: Object.freeze({ family: 'calm', color: '#38bdf8', glowColor: 'rgba(56, 189, 248, 0.36)' }),
+  danger: Object.freeze({ family: 'danger', color: '#fb7185', glowColor: 'rgba(248, 113, 113, 0.45)' }),
+  insight: Object.freeze({ family: 'insight', color: '#c084fc', glowColor: 'rgba(192, 132, 252, 0.44)' }),
+  resolve: Object.freeze({ family: 'resolve', color: '#22d3ee', glowColor: 'rgba(34, 211, 238, 0.42)' }),
+  mystic: Object.freeze({ family: 'mystic', color: '#d8b4fe', glowColor: 'rgba(216, 180, 254, 0.46)' }),
+};
+
 function clamp01(value) {
   if (!Number.isFinite(value)) {
     return 0;
@@ -21,6 +40,22 @@ function clamp01(value) {
   if (value <= 0) return 0;
   if (value >= 1) return 1;
   return value;
+}
+
+function clamp(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  if (value <= min) return min;
+  if (value >= max) return max;
+  return value;
+}
+
+function resolvePulseFamilyTheme(family) {
+  if (family && PULSE_FAMILY_THEMES[family]) {
+    return PULSE_FAMILY_THEMES[family];
+  }
+  return PULSE_FAMILY_THEMES.default;
 }
 
 function createScanlineOverlay() {
@@ -870,37 +905,74 @@ export class BrainViewer {
   }
 
   _createSnapshotPulseAppearance(strength, descriptor = null) {
-    if (descriptor && typeof descriptor.appearance === 'object') {
-      const appearance = { ...descriptor.appearance };
-      if (appearance.color == null) {
-        appearance.color = descriptor.color ?? PARTICLE_COLOR;
-      }
-      if (appearance.opacity == null) {
-        appearance.opacity = 0.45 + clamp01(Number(strength)) * 0.35;
-      }
-      if (appearance.size == null) {
-        appearance.size = 2.1 + clamp01(Number(strength)) * 2.6;
-      }
-      return appearance;
-    }
-
     const ratio = clamp01(Number(strength));
-    const appearance = {
-      color: descriptor?.color ?? PARTICLE_COLOR,
-      opacity: descriptor?.opacity != null ? descriptor.opacity : 0.45 + ratio * 0.35,
-      size: descriptor?.size != null ? descriptor.size : 2.1 + ratio * 2.6,
-    };
+    const incomingAppearance =
+      descriptor && typeof descriptor.appearance === 'object' ? { ...descriptor.appearance } : {};
 
-    if (descriptor?.trailColor) {
-      appearance.trailColor = descriptor.trailColor;
-      appearance.trailWidth = descriptor.trailWidth ?? 1.4;
+    const family = descriptor?.family ?? incomingAppearance.family ?? null;
+    const theme = resolvePulseFamilyTheme(family);
+    const result = { ...incomingAppearance };
+    result.family = family ?? theme.family ?? 'default';
+
+    const baseColor = descriptor?.color ?? result.color ?? theme.color ?? PARTICLE_COLOR;
+    result.color = baseColor;
+
+    const rawBrightness = descriptor?.brightness ?? result.brightness ?? 1;
+    const brightness = clamp(rawBrightness, 0.1, 2.5);
+    result.brightness = brightness;
+
+    const sizeBoost = descriptor?.sizeBoost ?? result.sizeBoost ?? 0;
+    result.sizeBoost = sizeBoost;
+    const baseSize =
+      descriptor?.size ?? result.size ?? PARTICLE_BASE_SIZE + ratio * PARTICLE_SIZE_RANGE;
+    let finalSize = Number.isFinite(baseSize) ? baseSize + sizeBoost : PARTICLE_BASE_SIZE;
+    if (!Number.isFinite(finalSize) || finalSize < PARTICLE_MIN_SIZE) {
+      finalSize = PARTICLE_MIN_SIZE;
     }
-    if (descriptor?.glowColor) {
-      appearance.glowColor = descriptor.glowColor;
-      appearance.glowSize = descriptor.glowSize ?? 8;
+    result.size = finalSize;
+
+    const baseOpacity =
+      descriptor?.opacity ?? result.opacity ?? PARTICLE_BASE_OPACITY + ratio * PARTICLE_OPACITY_RANGE;
+    const opacityBoost = descriptor?.opacityBoost ?? result.opacityBoost ?? 0;
+    result.opacityBoost = opacityBoost;
+    let finalOpacity = clamp(baseOpacity + opacityBoost, PARTICLE_MIN_OPACITY, PARTICLE_MAX_OPACITY);
+    finalOpacity = clamp(finalOpacity * brightness, PARTICLE_MIN_OPACITY, PARTICLE_MAX_OPACITY);
+    result.opacity = finalOpacity;
+
+    const glowStrengthSource =
+      descriptor?.glowStrength ?? descriptor?.glow ?? result.glowStrength ?? result.glow ?? 0;
+    const normalizedGlow = clamp(glowStrengthSource, 0, 2);
+    const glowColor = descriptor?.glowColor ?? result.glowColor ?? theme.glowColor ?? baseColor;
+    const glowOpacityBase =
+      descriptor?.glowOpacity ?? result.glowOpacity ?? Math.min(0.82, 0.38 + normalizedGlow * 0.28);
+    const glowSizeBase = descriptor?.glowSize ?? result.glowSize ?? finalSize * (2.2 + normalizedGlow * 0.6);
+
+    if (normalizedGlow > 0 || descriptor?.glowColor || result.glowColor || theme.glowColor) {
+      result.glowStrength = normalizedGlow;
+      result.glow = normalizedGlow;
+      result.glowColor = glowColor;
+      result.glowOpacity = clamp(glowOpacityBase * brightness, 0.12, 0.9);
+      result.glowSize = Math.max(finalSize * 1.8, glowSizeBase);
+    } else {
+      result.glowStrength = undefined;
+      result.glow = undefined;
+      result.glowColor = undefined;
+      result.glowOpacity = undefined;
+      result.glowSize = undefined;
     }
 
-    return appearance;
+    const trailColor = descriptor?.trailColor ?? result.trailColor ?? null;
+    const trailWidth =
+      descriptor?.trailWidth ?? result.trailWidth ?? (normalizedGlow > 0.75 ? 1.6 : normalizedGlow > 0.35 ? 1.25 : null);
+    if (trailColor) {
+      result.trailColor = trailColor;
+      result.trailWidth = trailWidth ?? 1.15;
+    } else {
+      result.trailColor = undefined;
+      result.trailWidth = undefined;
+    }
+
+    return result;
   }
 
   _drawPulses(ctx) {
@@ -917,9 +989,25 @@ export class BrainViewer {
       const x = segment.from.x + (segment.to.x - segment.from.x) * t;
       const y = segment.from.y + (segment.to.y - segment.from.y) * t;
       const appearance = pulse.appearance ?? {};
-      const size = appearance.size ?? 3;
-      const opacity = appearance.opacity ?? 0.85;
       const color = appearance.color ?? PARTICLE_COLOR;
+      const brightness = clamp(appearance.brightness ?? 1, 0.12, 2.4);
+      const size = Math.max(PARTICLE_MIN_SIZE, appearance.size ?? PARTICLE_BASE_SIZE);
+      const strength = clamp01(pulse.strength ?? 0.6);
+      const defaultOpacity = clamp(
+        PARTICLE_BASE_OPACITY + strength * PARTICLE_OPACITY_RANGE,
+        PARTICLE_MIN_OPACITY,
+        PARTICLE_MAX_OPACITY,
+      );
+      const opacity = clamp(
+        (appearance.opacity ?? defaultOpacity) * brightness,
+        PARTICLE_MIN_OPACITY,
+        PARTICLE_MAX_OPACITY,
+      );
+      const glowStrength = appearance.glowStrength ?? appearance.glow ?? 0;
+      const glowOpacity = appearance.glowOpacity
+        ? clamp(appearance.glowOpacity * brightness, 0.05, 0.9)
+        : Math.min(0.78, opacity * (0.35 + glowStrength * 0.35));
+      const glowSize = Math.max(size * 1.6, appearance.glowSize ?? size * (2 + glowStrength));
       ctx.save();
       if (appearance.trailColor && appearance.trailWidth) {
         const trailFactor = 0.1;
@@ -927,18 +1015,18 @@ export class BrainViewer {
         const trailX = segment.from.x + (segment.to.x - segment.from.x) * trailT;
         const trailY = segment.from.y + (segment.to.y - segment.from.y) * trailT;
         ctx.strokeStyle = appearance.trailColor;
-        ctx.lineWidth = appearance.trailWidth;
-        ctx.globalAlpha = Math.min(0.7, opacity);
+        ctx.lineWidth = clamp(appearance.trailWidth, 0.4, 3.2);
+        ctx.globalAlpha = Math.min(0.75, opacity * 0.9);
         ctx.beginPath();
         ctx.moveTo(trailX, trailY);
         ctx.lineTo(x, y);
         ctx.stroke();
       }
-      if (appearance.glowColor && appearance.glowSize) {
+      if (appearance.glowColor && glowSize > size) {
         ctx.fillStyle = appearance.glowColor;
-        ctx.globalAlpha = Math.min(0.6, opacity * 0.6);
+        ctx.globalAlpha = Math.min(glowOpacity, opacity * 0.8);
         ctx.beginPath();
-        ctx.arc(x, y, appearance.glowSize, 0, Math.PI * 2);
+        ctx.arc(x, y, glowSize, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.fillStyle = color;

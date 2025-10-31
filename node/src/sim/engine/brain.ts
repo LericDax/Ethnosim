@@ -78,6 +78,27 @@ export interface BrainDecision {
   chosenNodeId: string;
 }
 
+export interface BrainPulseAppearance {
+  family?: string;
+  color?: string;
+  glow?: number;
+  glowStrength?: number;
+  glowColor?: string;
+  glowSize?: number;
+  glowOpacity?: number;
+  size?: number;
+  sizeBoost?: number;
+  opacity?: number;
+  opacityBoost?: number;
+  brightness?: number;
+  trailColor?: string;
+  trailWidth?: number;
+}
+
+export type BrainPulsePaletteEntry = BrainPulseAppearance;
+
+export type BrainPulsePalette = Record<string, BrainPulsePaletteEntry>;
+
 interface BrainPulse {
   id: string;
   edgeKey: string;
@@ -87,6 +108,7 @@ interface BrainPulse {
   travelDuration: number;
   elapsed: number;
   strength: number;
+  appearance?: BrainPulseAppearance;
 }
 
 export interface BrainPulseEvent {
@@ -97,6 +119,7 @@ export interface BrainPulseEvent {
   startedTick: number;
   travelDuration: number;
   strength: number;
+  appearance?: BrainPulseAppearance;
 }
 
 export interface BrainState {
@@ -157,6 +180,7 @@ interface SerializedBrainPulse {
   travelDuration: number;
   elapsed: number;
   strength: number;
+  appearance?: BrainPulseAppearance;
 }
 
 export interface BrainMultiplierSet {
@@ -187,6 +211,195 @@ const PULSE_EVENT_TTL = 128;
 const PULSE_LEAK_MULTIPLIER = 0.96;
 const PULSE_JITTER_RANGE = 0.18;
 const MIN_CHARGE_VALUE = 1e-4;
+
+const DEFAULT_PULSE_PALETTE: BrainPulsePalette = Object.freeze({
+  default: Object.freeze({
+    family: 'default',
+    color: '#7dd3fc',
+    glowColor: 'rgba(125, 211, 252, 0.55)',
+    glowStrength: 0.65,
+    glowSize: 18,
+    opacityBoost: 0.05,
+    sizeBoost: 0.45,
+    brightness: 0.9,
+    trailColor: 'rgba(125, 211, 252, 0.32)',
+    trailWidth: 1.25,
+  }),
+  social: Object.freeze({
+    family: 'empathy',
+    color: '#60a5fa',
+    glowColor: 'rgba(96, 165, 250, 0.5)',
+    glowStrength: 0.75,
+    sizeBoost: 0.6,
+    brightness: 1,
+  }),
+  need: Object.freeze({
+    family: 'vital',
+    color: '#facc15',
+    glowColor: 'rgba(250, 204, 21, 0.45)',
+    glowStrength: 0.8,
+    sizeBoost: 0.5,
+    brightness: 1.1,
+  }),
+  rest: Object.freeze({
+    family: 'calm',
+    color: '#38bdf8',
+    glowColor: 'rgba(56, 189, 248, 0.45)',
+    glowStrength: 0.5,
+    brightness: 0.85,
+  }),
+  fear: Object.freeze({
+    family: 'danger',
+    color: '#f87171',
+    glowColor: 'rgba(248, 113, 113, 0.48)',
+    glowStrength: 1.1,
+    brightness: 1.25,
+    opacityBoost: 0.12,
+  }),
+  alert: Object.freeze({
+    family: 'danger',
+    color: '#f97316',
+    glowColor: 'rgba(249, 115, 22, 0.48)',
+    glowStrength: 0.95,
+    brightness: 1.2,
+  }),
+  learn: Object.freeze({
+    family: 'insight',
+    color: '#a855f7',
+    glowColor: 'rgba(168, 85, 247, 0.55)',
+    glowStrength: 0.85,
+    sizeBoost: 0.3,
+  }),
+  curiosity: Object.freeze({
+    family: 'insight',
+    glowStrength: 0.65,
+    sizeBoost: 0.35,
+  }),
+  duty: Object.freeze({
+    family: 'resolve',
+    color: '#22d3ee',
+    glowColor: 'rgba(34, 211, 238, 0.48)',
+    glowStrength: 0.7,
+    brightness: 0.95,
+  }),
+  loyalty: Object.freeze({
+    family: 'resolve',
+    color: '#0ea5e9',
+    glowColor: 'rgba(14, 165, 233, 0.5)',
+    glowStrength: 0.9,
+    sizeBoost: 0.25,
+  }),
+  ritual: Object.freeze({
+    family: 'mystic',
+    color: '#c084fc',
+    glowColor: 'rgba(192, 132, 252, 0.52)',
+    glowStrength: 1,
+    brightness: 1.15,
+  }),
+  home: Object.freeze({
+    family: 'calm',
+    color: '#5eead4',
+    glowColor: 'rgba(94, 234, 212, 0.42)',
+    glowStrength: 0.55,
+    brightness: 0.95,
+  }),
+});
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (value <= 0) {
+    return 0;
+  }
+  if (value >= 1) {
+    return 1;
+  }
+  return value;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  if (value <= min) {
+    return min;
+  }
+  if (value >= max) {
+    return max;
+  }
+  return value;
+}
+
+function clonePulseAppearance(
+  appearance: BrainPulseAppearance | undefined,
+): BrainPulseAppearance | undefined {
+  if (!appearance) {
+    return undefined;
+  }
+  return { ...appearance } satisfies BrainPulseAppearance;
+}
+
+function resolvePulseAppearance(
+  tags: string[],
+  strength: number,
+  palette: BrainPulsePalette,
+): BrainPulseAppearance | undefined {
+  const baseEntry = palette.default ? { ...palette.default } : {};
+  let matched = false;
+  for (const tag of tags) {
+    if (!tag) {
+      continue;
+    }
+    const entry = palette[tag];
+    if (!entry) {
+      continue;
+    }
+    matched = true;
+    Object.assign(baseEntry, entry);
+  }
+
+  if (!matched && palette.neutral) {
+    Object.assign(baseEntry, palette.neutral);
+  }
+
+  const resolved: BrainPulseAppearance = { ...baseEntry };
+  if (!resolved.family && matched) {
+    const firstTag = tags.find((tag) => Boolean(palette[tag]?.family));
+    if (firstTag && palette[firstTag]?.family) {
+      resolved.family = palette[firstTag]!.family;
+    }
+  }
+
+  const ratio = clamp01(strength * 4);
+  const brightness = resolved.brightness ?? 0.75 + ratio * 0.4;
+  resolved.brightness = clamp(brightness, 0.1, 2.5);
+
+  const glowStrength = resolved.glowStrength ?? resolved.glow ?? 0;
+  if (Number.isFinite(glowStrength) && glowStrength > 0) {
+    const normalizedGlow = clamp(glowStrength, 0, 2);
+    resolved.glowStrength = normalizedGlow;
+    resolved.glow = normalizedGlow;
+    if (resolved.glowSize == null) {
+      resolved.glowSize = 14 + normalizedGlow * 8;
+    }
+    if (resolved.glowOpacity == null) {
+      resolved.glowOpacity = clamp(0.35 + normalizedGlow * 0.25, 0.2, 0.85);
+    }
+  } else {
+    resolved.glowStrength = undefined;
+    resolved.glow = undefined;
+  }
+
+  if (resolved.sizeBoost == null) {
+    resolved.sizeBoost = 0;
+  }
+  if (resolved.opacityBoost == null) {
+    resolved.opacityBoost = 0;
+  }
+
+  return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
 
 function parseBrainJson(raw: string): BrainGraphDefinition {
   try {
@@ -336,6 +549,7 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       travelDuration: pulse.travelDuration,
       elapsed: pulse.elapsed,
       strength: pulse.strength,
+      appearance: clonePulseAppearance(pulse.appearance),
     })),
     nodeCharge: Object.fromEntries(state.nodeCharge.entries()),
     pulseEvents: state.pulseEvents.map((event) => ({
@@ -346,6 +560,7 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       startedTick: event.startedTick,
       travelDuration: event.travelDuration,
       strength: event.strength,
+      appearance: clonePulseAppearance(event.appearance),
     })),
     nextPulseId: state.nextPulseId,
   } satisfies SerializedBrainState;
@@ -387,6 +602,7 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
     travelDuration: pulse.travelDuration,
     elapsed: pulse.elapsed,
     strength: pulse.strength,
+    appearance: clonePulseAppearance(pulse.appearance),
   }));
   base.nodeCharge = new Map(Object.entries(serialized.nodeCharge ?? {}));
   base.pulseEvents = (serialized.pulseEvents ?? []).map((event) => ({
@@ -397,6 +613,7 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
     startedTick: event.startedTick,
     travelDuration: event.travelDuration,
     strength: event.strength,
+    appearance: clonePulseAppearance(event.appearance),
   }));
   base.nextPulseId = typeof serialized.nextPulseId === 'number' ? serialized.nextPulseId : 1;
   return base;
@@ -430,6 +647,7 @@ export interface BrainTickResult {
 export interface BrainTickContext {
   rng?: RngStream | null;
   tick?: number;
+  pulsePalette?: BrainPulsePalette | null;
 }
 
 export function tickBrain(
@@ -551,6 +769,7 @@ function distributePulseBudget(
   const jitterRange = PULSE_JITTER_RANGE;
   const travelDuration = Math.max(1, Math.round(duration * 0.5));
   const currentTick = typeof context.tick === 'number' ? context.tick : 0;
+  const palette = context.pulsePalette ?? DEFAULT_PULSE_PALETTE;
 
   const provisionalStrengths: number[] = [];
   for (const candidate of candidates) {
@@ -583,6 +802,7 @@ function distributePulseBudget(
     const pulseId = `pulse-${state.nextPulseId}`;
     state.nextPulseId += 1;
     const edgeKey = makeEdgeKey(state.currentNodeId, candidate.nodeId);
+    const appearance = resolvePulseAppearance(candidate.tags ?? [], strength, palette);
     const pulse: BrainPulse = {
       id: pulseId,
       edgeKey,
@@ -592,6 +812,7 @@ function distributePulseBudget(
       travelDuration,
       elapsed: 0,
       strength,
+      appearance: clonePulseAppearance(appearance),
     };
     nextPending.push(pulse);
     nextEvents.push({
@@ -602,6 +823,7 @@ function distributePulseBudget(
       startedTick: currentTick,
       travelDuration,
       strength,
+      appearance: clonePulseAppearance(appearance),
     });
   }
 

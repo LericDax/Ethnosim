@@ -9,6 +9,7 @@ import {
   serializeBrainState,
   cloneBrainDecision,
   type SerializedBrainState,
+  type BrainPulseAppearance,
 } from './engine/brain.ts';
 import {
   createInitialMovementState,
@@ -180,9 +181,25 @@ interface SnapshotBrainSummary {
 }
 
 interface SnapshotBrainPulse {
+  id: string;
   edgeId: string;
   progress: number;
   strength: number;
+  appearance?: BrainPulseAppearance;
+  color?: string;
+  glow?: number;
+  glowStrength?: number;
+  glowColor?: string;
+  glowSize?: number;
+  glowOpacity?: number;
+  size?: number;
+  sizeBoost?: number;
+  opacity?: number;
+  opacityBoost?: number;
+  brightness?: number;
+  trailColor?: string;
+  trailWidth?: number;
+  family?: string;
 }
 
 interface SnapshotBrainData {
@@ -1268,7 +1285,59 @@ function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
         pulse.travelDuration > 0 ? pulse.elapsed / pulse.travelDuration : pulse.elapsed > 0 ? 1 : 0,
       );
       const strength = clamp01(pulse.strength);
-      return { edgeId, progress: roundTo(progress), strength: roundTo(strength) } satisfies SnapshotBrainPulse;
+      const descriptor: SnapshotBrainPulse = {
+        id: pulse.id,
+        edgeId,
+        progress: roundTo(progress),
+        strength: roundTo(strength),
+      };
+      if (pulse.appearance) {
+        const appearance: BrainPulseAppearance = { ...pulse.appearance };
+        descriptor.appearance = appearance;
+        if (appearance.color) {
+          descriptor.color = appearance.color;
+        }
+        if (appearance.glow !== undefined) {
+          descriptor.glow = appearance.glow;
+        }
+        if (appearance.glowStrength !== undefined) {
+          descriptor.glowStrength = appearance.glowStrength;
+        }
+        if (appearance.glowColor) {
+          descriptor.glowColor = appearance.glowColor;
+        }
+        if (appearance.glowSize !== undefined) {
+          descriptor.glowSize = appearance.glowSize;
+        }
+        if (appearance.glowOpacity !== undefined) {
+          descriptor.glowOpacity = appearance.glowOpacity;
+        }
+        if (appearance.size !== undefined) {
+          descriptor.size = appearance.size;
+        }
+        if (appearance.sizeBoost !== undefined) {
+          descriptor.sizeBoost = appearance.sizeBoost;
+        }
+        if (appearance.opacity !== undefined) {
+          descriptor.opacity = appearance.opacity;
+        }
+        if (appearance.opacityBoost !== undefined) {
+          descriptor.opacityBoost = appearance.opacityBoost;
+        }
+        if (appearance.brightness !== undefined) {
+          descriptor.brightness = roundTo(appearance.brightness);
+        }
+        if (appearance.trailColor) {
+          descriptor.trailColor = appearance.trailColor;
+        }
+        if (appearance.trailWidth !== undefined) {
+          descriptor.trailWidth = appearance.trailWidth;
+        }
+        if (appearance.family) {
+          descriptor.family = appearance.family;
+        }
+      }
+      return descriptor;
     })
     .filter((pulse): pulse is SnapshotBrainPulse => Boolean(pulse));
 
