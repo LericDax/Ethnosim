@@ -641,14 +641,19 @@ export class Inspector {
       this.brainViewer.setLabel(options.label ?? brainId ?? null);
     }
 
+    const pulses = Array.isArray(brainData?.pulses) ? brainData.pulses : [];
+    const nodeFill =
+      (brainData && typeof brainData.nodeFill === 'object' ? brainData.nodeFill : null) ??
+      (brainData && typeof brainData.fillRatios === 'object' ? brainData.fillRatios : null);
+
     this.brainViewer.setData({
       nodes: graph.nodes.map((node) => ({ ...node })),
       edges: graph.edges.map((edge) => ({ ...edge })),
       currentNodeId,
       decision,
       transition: summary?.transition ?? null,
-      pulses: Array.isArray(brainData?.pulses) ? brainData.pulses : [],
-      fillRatios: brainData?.fillRatios ?? null,
+      pulses,
+      nodeFill,
     });
     this.brainSection.root.style.display = 'flex';
   }
