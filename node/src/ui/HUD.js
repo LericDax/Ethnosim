@@ -54,6 +54,8 @@ export class HUD {
     this._latestHousesById = new Map();
     this._latestCity = null;
     this._currentSelection = { type: null, id: null, data: null };
+    this.teleportButton = null;
+    this.teleportHintEl = null;
 
     this.headerEl = document.createElement('div');
     this.headerEl.textContent = 'Simulation HUD';
@@ -82,6 +84,8 @@ export class HUD {
     this._buildTickIntervalControl();
     this._buildTicksPerUpdateControl();
     this._buildAgentSelect();
+    this._buildAgentActionControls();
+    this._buildMapDisplayControls();
     this._buildHeatmapControls();
     this._buildCollectiveControls();
 
@@ -100,6 +104,8 @@ export class HUD {
         },
       );
     }
+
+    this._updateTeleportButtonState();
   }
 
   updateFromSnapshot(snapshot) {
@@ -267,6 +273,87 @@ export class HUD {
     this.controlsEl.appendChild(wrapper);
   }
 
+  _buildAgentActionControls() {
+    const wrapper = document.createElement('div');
+    wrapper.style.display = 'flex';
+    wrapper.style.flexDirection = 'column';
+    wrapper.style.gap = '6px';
+    wrapper.style.marginTop = '4px';
+
+    const label = document.createElement('span');
+    label.textContent = 'Agent actions';
+    label.style.fontWeight = '500';
+    wrapper.appendChild(label);
+
+    const spawnButton = document.createElement('button');
+    spawnButton.type = 'button';
+    spawnButton.textContent = 'Spawn test agent';
+    this._styleButton(spawnButton);
+    spawnButton.addEventListener('click', () => {
+      this.worker.postMessage({ type: 'SPAWN_TEST' });
+    });
+    wrapper.appendChild(spawnButton);
+
+    this.teleportButton = document.createElement('button');
+    this.teleportButton.type = 'button';
+    this.teleportButton.textContent = 'Teleport selected to center';
+    this._styleButton(this.teleportButton);
+    this.teleportButton.addEventListener('click', () => {
+      this._teleportSelectedAgentToCenter();
+    });
+    wrapper.appendChild(this.teleportButton);
+
+    this.teleportHintEl = document.createElement('span');
+    this.teleportHintEl.textContent = 'Select an agent to enable teleport.';
+    this.teleportHintEl.style.fontSize = '12px';
+    this.teleportHintEl.style.color = 'rgba(248, 250, 252, 0.7)';
+    this.teleportHintEl.style.lineHeight = '1.3';
+    wrapper.appendChild(this.teleportHintEl);
+
+    this.controlsEl.appendChild(wrapper);
+  }
+
+  _buildMapDisplayControls() {
+    const wrapper = document.createElement('div');
+    wrapper.style.display = 'flex';
+    wrapper.style.flexDirection = 'column';
+    wrapper.style.gap = '4px';
+    wrapper.style.marginTop = '4px';
+
+    const label = document.createElement('span');
+    label.textContent = 'Map display';
+    label.style.fontWeight = '500';
+    wrapper.appendChild(label);
+
+    const gridToggle = this._createCheckboxToggle(
+      'Pixel grid',
+      typeof this.scene.isGridVisible === 'function' ? this.scene.isGridVisible() : true,
+      (checked) => {
+        if (typeof this.scene.setGridVisible === 'function') {
+          this.scene.setGridVisible(checked);
+        }
+      },
+    );
+    wrapper.appendChild(gridToggle);
+
+    if (typeof this.scene.setCollectiveLayerEnabled === 'function') {
+      const dwellingsToggle = this._createCheckboxToggle(
+        'Show dwellings',
+        typeof this.scene.isCollectiveLayerEnabled === 'function'
+          ? this.scene.isCollectiveLayerEnabled('dwellings')
+          : true,
+        (checked) => {
+          if (typeof this.scene.setCollectiveLayerEnabled === 'function') {
+            this.scene.setCollectiveLayerEnabled('dwellings', checked);
+          }
+        },
+      );
+      wrapper.appendChild(dwellingsToggle);
+    }
+
+    this.controlsEl.appendChild(wrapper);
+  }
+
   _buildHeatmapControls() {
     const wrapper = document.createElement('div');
     wrapper.style.display = 'flex';
@@ -304,10 +391,8 @@ export class HUD {
     label.style.fontWeight = '500';
     wrapper.appendChild(label);
 
-    const dwellingsToggle = this._createCollectiveToggle('Dwellings', 'dwellings');
     const cityToggle = this._createCollectiveToggle('City', 'city');
 
-    wrapper.appendChild(dwellingsToggle);
     wrapper.appendChild(cityToggle);
 
     this.controlsEl.appendChild(wrapper);
@@ -355,6 +440,28 @@ export class HUD {
       if (typeof this.scene.setCollectiveLayerEnabled === 'function') {
         this.scene.setCollectiveLayerEnabled(layerId, checkbox.checked);
       }
+    });
+
+    const span = document.createElement('span');
+    span.textContent = labelText;
+
+    row.appendChild(checkbox);
+    row.appendChild(span);
+    return row;
+  }
+
+  _createCheckboxToggle(labelText, checked, onChange) {
+    const row = document.createElement('label');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    row.style.cursor = 'pointer';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = Boolean(checked);
+    checkbox.addEventListener('change', () => {
+      onChange(Boolean(checkbox.checked));
     });
 
     const span = document.createElement('span');
@@ -442,6 +549,7 @@ export class HUD {
     }
 
     this._updateInspectorSelection(normalized);
+    this._updateTeleportButtonState();
   }
 
   _styleButton(button) {
@@ -456,10 +564,11 @@ export class HUD {
       fontWeight: '500',
     });
     button.addEventListener('mouseenter', () => {
+      if (button.disabled) return;
       button.style.background = '#1d4ed8';
     });
     button.addEventListener('mouseleave', () => {
-      button.style.background = '#2563eb';
+      button.style.background = button.disabled ? '#1e293b' : '#2563eb';
     });
   }
 
@@ -476,6 +585,51 @@ export class HUD {
   _styleSelect(select) {
     this._styleInput(select);
     select.style.cursor = 'pointer';
+  }
+
+  _setButtonEnabled(button, enabled) {
+    const isEnabled = Boolean(enabled);
+    button.disabled = !isEnabled;
+    button.style.opacity = isEnabled ? '1' : '0.55';
+    button.style.cursor = isEnabled ? 'pointer' : 'not-allowed';
+    button.style.background = isEnabled ? '#2563eb' : '#1e293b';
+  }
+
+  _updateTeleportButtonState() {
+    if (!this.teleportButton) {
+      return;
+    }
+    const hasAgentSelection = this._currentSelection.type === 'agent' && !!this._currentSelection.id;
+    this._setButtonEnabled(this.teleportButton, hasAgentSelection);
+    this.teleportButton.title = hasAgentSelection
+      ? 'Teleport the selected agent to the map center'
+      : 'Select an agent in the scene to enable teleport.';
+    if (this.teleportHintEl) {
+      this.teleportHintEl.style.display = hasAgentSelection ? 'none' : 'block';
+    }
+  }
+
+  _teleportSelectedAgentToCenter() {
+    if (!this._currentSelection || this._currentSelection.type !== 'agent' || !this._currentSelection.id) {
+      return;
+    }
+
+    let targetX = 0;
+    let targetY = 0;
+    if (typeof this.scene.getWorldCenter === 'function') {
+      const center = this.scene.getWorldCenter();
+      if (center && Number.isFinite(center.x) && Number.isFinite(center.y)) {
+        targetX = center.x;
+        targetY = center.y;
+      }
+    }
+
+    this.worker.postMessage({
+      type: 'MOVE_AGENT',
+      id: this._currentSelection.id,
+      x: targetX,
+      y: targetY,
+    });
   }
 
   _normalizeSelection(selection) {
