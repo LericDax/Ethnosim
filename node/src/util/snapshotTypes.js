@@ -4,6 +4,8 @@
  * @property {number} x - X coordinate within the world grid.
  * @property {number} y - Y coordinate within the world grid.
  * @property {'baby'|'child'|'teen'|'adult'} lifeStage - Lifecycle band used for rendering.
+ * @property {Object<string, number>=} carriedResources - Lightweight resource bundle carried by the agent.
+ * @property {{harvested?: Object<string, number>, delivered?: Object<string, number>}=} resourceActivity - Per-tick harvest/delivery bookkeeping.
  */
 
 /**
@@ -12,6 +14,8 @@
  * @property {number} x
  * @property {number} y
  * @property {string[]} members
+ * @property {Object<string, number>=} stockpiles
+ * @property {{active?: boolean, progress?: number, required?: number, cooldownUntil?: number}=} construction
  */
 
 /**
@@ -20,6 +24,7 @@
  * @property {number} x
  * @property {number} y
  * @property {string[]} households
+ * @property {Object<string, number>=} stockpiles
  */
 
 /**

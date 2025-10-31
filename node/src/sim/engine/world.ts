@@ -15,6 +15,8 @@ export interface WorldState {
   centerY: number;
   climateSeed: number;
   terrain: TerrainLayer;
+  forestResources: Float32Array;
+  forestResourceCapacity: number;
 }
 
 const TERRAIN_ZONES: Array<{ type: TerrainType; radius: number }> = [
@@ -31,12 +33,17 @@ export function createWorld(width: number, height: number, stream: RngStream): W
   const maxRadius = Math.hypot(centerX, centerY) || 1;
 
   const tiles: TerrainType[] = new Array<TerrainType>(safeWidth * safeHeight);
+  const forestResources = new Float32Array(safeWidth * safeHeight);
+  const forestCapacity = 12;
   for (let y = 0; y < safeHeight; y += 1) {
     for (let x = 0; x < safeWidth; x += 1) {
       const dx = x - centerX;
       const dy = y - centerY;
       const distanceRatio = Math.min(1, Math.hypot(dx, dy) / maxRadius);
-      tiles[y * safeWidth + x] = classifyTerrain(distanceRatio);
+      const terrain = classifyTerrain(distanceRatio);
+      const index = y * safeWidth + x;
+      tiles[index] = terrain;
+      forestResources[index] = terrain === 'forest' ? forestCapacity * (0.4 + stream.nextFloat() * 0.6) : 0;
     }
   }
 
@@ -47,6 +54,8 @@ export function createWorld(width: number, height: number, stream: RngStream): W
     centerY,
     climateSeed: stream.nextFloat(),
     terrain: { width: safeWidth, height: safeHeight, tiles },
+    forestResources,
+    forestResourceCapacity: forestCapacity,
   };
 }
 
@@ -87,6 +96,55 @@ export function isPlainsTile(world: WorldState, x: number, y: number): boolean {
 
 export function isForestTile(world: WorldState, x: number, y: number): boolean {
   return isTerrainType(world, x, y, 'forest');
+}
+
+export function getForestResourceAt(world: WorldState, x: number, y: number): number {
+  const tileX = Math.floor(x);
+  const tileY = Math.floor(y);
+  if (!isWithinBounds(world, tileX, tileY)) {
+    return 0;
+  }
+  const index = tileY * world.width + tileX;
+  return world.forestResources[index] ?? 0;
+}
+
+export function harvestForestResource(
+  world: WorldState,
+  x: number,
+  y: number,
+  amount: number,
+): number {
+  if (amount <= 0) {
+    return 0;
+  }
+  const tileX = Math.floor(x);
+  const tileY = Math.floor(y);
+  if (!isWithinBounds(world, tileX, tileY)) {
+    return 0;
+  }
+  const index = tileY * world.width + tileX;
+  const available = world.forestResources[index] ?? 0;
+  if (available <= 0) {
+    return 0;
+  }
+  const harvested = Math.min(available, amount);
+  world.forestResources[index] = available - harvested;
+  return harvested;
+}
+
+export function addForestResource(world: WorldState, x: number, y: number, amount: number): void {
+  if (amount <= 0) {
+    return;
+  }
+  const tileX = Math.floor(x);
+  const tileY = Math.floor(y);
+  if (!isWithinBounds(world, tileX, tileY)) {
+    return;
+  }
+  const index = tileY * world.width + tileX;
+  const current = world.forestResources[index] ?? 0;
+  const capacity = world.forestResourceCapacity;
+  world.forestResources[index] = Math.min(capacity, current + amount);
 }
 
 export function clampPosition(world: WorldState, x: number, y: number): { x: number; y: number } {

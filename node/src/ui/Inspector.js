@@ -91,6 +91,46 @@ function clamp01(value) {
   return value;
 }
 
+function formatResourceBundleDisplay(bundle) {
+  if (!bundle || typeof bundle !== 'object') {
+    return '0';
+  }
+  const entries = Object.entries(bundle)
+    .filter(([, value]) => Number.isFinite(value))
+    .map(([key, value]) => `${key}: ${Number(value).toFixed(1)}`);
+  return entries.length > 0 ? entries.join(', ') : '0';
+}
+
+function formatResourceActivityDisplay(activity) {
+  if (!activity || typeof activity !== 'object') {
+    return '–';
+  }
+  const parts = [];
+  if (activity.harvested) {
+    const harvested = formatResourceBundleDisplay(activity.harvested);
+    if (harvested !== '0') {
+      parts.push(`Harvested ${harvested}`);
+    }
+  }
+  if (activity.delivered) {
+    const delivered = formatResourceBundleDisplay(activity.delivered);
+    if (delivered !== '0') {
+      parts.push(`Delivered ${delivered}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(' • ') : '–';
+}
+
+function formatBuildProgressDisplay(construction) {
+  if (!construction || typeof construction !== 'object') {
+    return '0% (0.0 / 0.0)';
+  }
+  const progress = Number(construction.progress ?? 0);
+  const required = Math.max(1, Number(construction.required ?? 1));
+  const ratio = Math.max(0, Math.min(1, progress / required));
+  return `${Math.round(ratio * 100)}% (${progress.toFixed(1)} / ${required.toFixed(1)})`;
+}
+
 export class Inspector {
   constructor({ container = document.body, onRequestClose = null } = {}) {
     this.container = container;
@@ -332,6 +372,8 @@ export class Inspector {
       'Bond partner': agent?.bondPartnerId ?? agent?.bond_partner_id ?? '–',
       Parents: agent?.parents ?? agent?.parent_ids ?? [],
       Fertility: typeof agent?.fertility === 'number' ? agent.fertility.toFixed(2) : '–',
+      'Carrying resources': formatResourceBundleDisplay(agent?.carriedResources),
+      'Resource activity': formatResourceActivityDisplay(agent?.resourceActivity),
     };
     this._updateInfoSection(this.statusSection, statusData);
 
@@ -458,6 +500,18 @@ export class Inspector {
     const statusData = {
       Radius: typeof house?.radius === 'number' ? house.radius.toFixed(1) : '–',
       Authority: typeof house?.authority === 'number' ? house.authority.toFixed(2) : '–',
+      'Wood stockpile': formatResourceBundleDisplay(house?.stockpiles),
+      'Build progress': formatBuildProgressDisplay(house?.construction),
+      'Construction active':
+        typeof house?.construction?.active === 'boolean'
+          ? house.construction.active
+            ? 'Yes'
+            : 'No'
+          : 'Unknown',
+      'Build cooldown':
+        typeof house?.construction?.cooldownUntil === 'number'
+          ? Math.max(0, Math.round(house.construction.cooldownUntil))
+          : '–',
     };
     this._updateInfoSection(this.statusSection, statusData);
 
@@ -492,6 +546,7 @@ export class Inspector {
       Authority: typeof city?.authority === 'number' ? city.authority.toFixed(2) : '–',
       'Demand expires at':
         typeof city?.demandExpiresAt === 'number' ? Math.max(0, Math.round(city.demandExpiresAt)) : '–',
+      'Wood stockpile': formatResourceBundleDisplay(city?.stockpiles),
     };
     this._updateInfoSection(this.statusSection, statusData);
 
