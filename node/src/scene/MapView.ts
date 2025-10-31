@@ -103,6 +103,12 @@ export interface SnapshotBrainData {
     currentNodeId?: string;
     lastDecision?: unknown;
   } | null;
+  pulses?: Array<{
+    edgeId: string;
+    progress: number;
+    strength: number;
+  }>;
+  fillRatios?: Record<string, number> | null;
 }
 
 export interface SnapshotLeader {

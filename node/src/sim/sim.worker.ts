@@ -153,6 +153,9 @@ const RESOURCE_GATHER_RATE = 1.5;
 const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
 const RESOURCE_GATHER_NODES = new Set<string>(['AccumulateStock', 'BuildDwelling']);
 
+const MAX_SNAPSHOT_PULSES = 32;
+const MAX_SNAPSHOT_FILL_NODES = 32;
+
 interface SnapshotBrainTransitionTiming {
   durationTicks: number;
   remainingTicks: number;
@@ -176,9 +179,17 @@ interface SnapshotBrainSummary {
   transition: SnapshotBrainTransitionTiming | null;
 }
 
+interface SnapshotBrainPulse {
+  edgeId: string;
+  progress: number;
+  strength: number;
+}
+
 interface SnapshotBrainData {
   summary: SnapshotBrainSummary;
   state: SerializedBrainState;
+  pulses: SnapshotBrainPulse[];
+  fillRatios: Record<string, number>;
 }
 
 interface SnapshotAgent {
@@ -1232,6 +1243,74 @@ function sanitizeResourceValue(value: number | undefined): number {
   return value < 0 ? 0 : value;
 }
 
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (value <= 0) {
+    return 0;
+  }
+  if (value >= 1) {
+    return 1;
+  }
+  return value;
+}
+
+function roundTo(value: number, decimals = 3): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const factor = 10 ** Math.max(0, decimals);
+  return Math.round(value * factor) / factor;
+}
+
+function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
+  if (!brain.pendingPulses.length) {
+    return [];
+  }
+  const pulses = brain.pendingPulses
+    .map((pulse) => {
+      const edgeId = pulse.edgeKey;
+      if (!edgeId) {
+        return null;
+      }
+      const progress = clamp01(
+        pulse.travelDuration > 0 ? pulse.elapsed / pulse.travelDuration : pulse.elapsed > 0 ? 1 : 0,
+      );
+      const strength = clamp01(pulse.strength);
+      return { edgeId, progress: roundTo(progress), strength: roundTo(strength) } satisfies SnapshotBrainPulse;
+    })
+    .filter((pulse): pulse is SnapshotBrainPulse => Boolean(pulse));
+
+  if (pulses.length <= MAX_SNAPSHOT_PULSES) {
+    return pulses;
+  }
+  return pulses
+    .sort((a, b) => b.progress - a.progress || b.strength - a.strength)
+    .slice(0, MAX_SNAPSHOT_PULSES);
+}
+
+function extractSnapshotFillRatios(brain: BrainState): Record<string, number> {
+  if (brain.nodeCharge.size === 0) {
+    return {};
+  }
+  const entries = Array.from(brain.nodeCharge.entries())
+    .map(([nodeId, value]) => ({ nodeId, ratio: clamp01(value) }))
+    .filter((entry) => entry.nodeId && entry.ratio > 0)
+    .sort((a, b) => b.ratio - a.ratio);
+
+  const limited = entries.slice(0, MAX_SNAPSHOT_FILL_NODES);
+  if (!limited.length) {
+    return {};
+  }
+
+  const result: Record<string, number> = {};
+  for (const entry of limited) {
+    result[entry.nodeId] = roundTo(entry.ratio);
+  }
+  return result;
+}
+
 const SAFE_NUMBER_MASK = BigInt('0x1fffffffffffff');
 
 export function createSnapshot(simulation: SimulationState): Snapshot {
@@ -1403,6 +1482,8 @@ function createBrainSnapshot(
   const safeDurationTicks = durationTicks > 0 ? durationTicks : 1;
   const elapsedTicks = Math.max(0, safeDurationTicks - Math.min(remainingTicks, safeDurationTicks));
   const tickDurationMs = computeEffectiveTickDurationMs();
+  const pulses = extractSnapshotBrainPulses(brain);
+  const fillRatios = extractSnapshotFillRatios(brain);
   const transition: SnapshotBrainTransitionTiming = {
     durationTicks: safeDurationTicks,
     remainingTicks,
@@ -1426,6 +1507,8 @@ function createBrainSnapshot(
       transition,
     },
     state: serializeBrainState(brain),
+    pulses,
+    fillRatios,
   };
 }
 
