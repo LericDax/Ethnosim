@@ -24,6 +24,7 @@ import {
   type SerializedAgentState,
   type SerializedCityState,
   type SerializedHouseState,
+  type SerializedMovementState,
   type SerializedSimulationState,
   type SerializedWorldState,
   type SerializedReproductiveGroup,
@@ -31,6 +32,7 @@ import {
 } from './save.ts';
 import { matchReproductivePartners } from '../engine/repro.ts';
 import type { ReproductiveGroup } from '../engine/repro.ts';
+import { createInitialMovementState } from '../engine/move.ts';
 
 export async function loadSimulationState(id: string): Promise<SimulationState | null> {
   const db = await openDatabase();
@@ -188,7 +190,37 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     houseId: serialized.houseId,
     carriedResources: cloneResourceBundle(serialized.carriedResources),
     resourceActivity: cloneAgentResourceActivity(serialized.resourceActivity),
+    movement: restoreMovementState(serialized.movement),
   };
+}
+
+function restoreMovementState(serialized: SerializedMovementState | undefined): AgentState['movement'] {
+  const state = createInitialMovementState();
+  if (!serialized) {
+    return state;
+  }
+
+  state.behaviorId = serialized.behaviorId ?? null;
+  state.target = serialized.target ? { x: serialized.target.x, y: serialized.target.y } : null;
+  state.waypoints = Array.isArray(serialized.waypoints)
+    ? serialized.waypoints.map((point) => ({ x: point.x, y: point.y }))
+    : null;
+  state.waypointIndex = Number.isFinite(serialized.waypointIndex)
+    ? Math.max(0, Math.floor(serialized.waypointIndex))
+    : 0;
+  state.timer = Number.isFinite(serialized.timer) ? Math.max(0, Math.floor(serialized.timer)) : 0;
+  state.lingerTicks = Number.isFinite(serialized.lingerTicks)
+    ? Math.max(0, Math.floor(serialized.lingerTicks))
+    : 0;
+  state.data = serialized.data ? { ...serialized.data } : {};
+  state.sameNodeId = serialized.sameNodeId ?? null;
+  state.sameNodeTicks = Number.isFinite(serialized.sameNodeTicks)
+    ? Math.max(0, Math.floor(serialized.sameNodeTicks))
+    : 0;
+  if (Number.isFinite(serialized.sameNodeLimit)) {
+    state.sameNodeLimit = Math.max(4, Math.floor(serialized.sameNodeLimit));
+  }
+  return state;
 }
 
 function restoreReproductiveGroup(serialized: SerializedReproductiveGroup): ReproductiveGroup {

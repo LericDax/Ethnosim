@@ -4,6 +4,7 @@ import type { BrainDecision } from '../engine/brain.ts';
 import type { SerializedSeededRng, SerializedRngStream } from '../engine/rng.ts';
 import type { WorldState } from '../engine/world.ts';
 import type { AgentState, PregnancyState } from '../sim.worker.ts';
+import type { MovementState } from '../engine/move.ts';
 import {
   HOUSE_CONSTRUCTION_COST,
   cloneLeaderDescriptor,
@@ -54,6 +55,20 @@ export interface SerializedAgentState {
   houseId: string | null;
   carriedResources: AgentState['carriedResources'];
   resourceActivity: AgentState['resourceActivity'];
+  movement: SerializedMovementState;
+}
+
+export interface SerializedMovementState {
+  behaviorId: string | null;
+  target: { x: number; y: number } | null;
+  waypoints: Array<{ x: number; y: number }> | null;
+  waypointIndex: number;
+  timer: number;
+  lingerTicks: number;
+  data: Record<string, unknown>;
+  sameNodeId: string | null;
+  sameNodeTicks: number;
+  sameNodeLimit: number;
 }
 
 export interface SerializedReproductiveGroup {
@@ -242,6 +257,22 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     houseId: agent.houseId ?? null,
     carriedResources: cloneResourceBundle(agent.carriedResources),
     resourceActivity: cloneAgentResourceActivity(agent.resourceActivity),
+    movement: serializeMovementState(agent.movement),
+  };
+}
+
+function serializeMovementState(state: MovementState): SerializedMovementState {
+  return {
+    behaviorId: state.behaviorId,
+    target: state.target ? { x: state.target.x, y: state.target.y } : null,
+    waypoints: state.waypoints ? state.waypoints.map((point) => ({ x: point.x, y: point.y })) : null,
+    waypointIndex: state.waypointIndex,
+    timer: state.timer,
+    lingerTicks: state.lingerTicks,
+    data: { ...state.data },
+    sameNodeId: state.sameNodeId,
+    sameNodeTicks: state.sameNodeTicks,
+    sameNodeLimit: state.sameNodeLimit,
   };
 }
 

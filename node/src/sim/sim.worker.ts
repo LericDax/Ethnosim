@@ -10,7 +10,12 @@ import {
   cloneBrainDecision,
   type SerializedBrainState,
 } from './engine/brain.ts';
-import { moveAgent, type MovableAgent, type MovementContext } from './engine/move.ts';
+import {
+  createInitialMovementState,
+  moveAgent,
+  type MovableAgent,
+  type MovementContext,
+} from './engine/move.ts';
 import {
   createWorld,
   clampPosition,
@@ -690,6 +695,7 @@ function createAgents(
       houseId: null,
       carriedResources: { wood: 0 },
       resourceActivity: null,
+      movement: createInitialMovementState(),
     });
   }
 
@@ -860,9 +866,17 @@ export function stepSimulationState(simulation: SimulationState): void {
     agentsById.set(agent.id, agent);
   });
 
+  const housesById = new Map<string, HouseState>();
+  simulation.houses.forEach((house) => {
+    housesById.set(house.id, house);
+  });
+
   const movementContext: MovementContext = {
     world: simulation.world,
     agentsById,
+    housesById,
+    city: simulation.city,
+    tick: simulation.tick,
   };
 
   simulation.agents.forEach((agent) => {

@@ -4,11 +4,11 @@
   "nodes": [
     { "id": "Gather", "base_freq": 1.0, "duration": 6, "tags": ["work", "outward"] },
     { "id": "Stockpile", "base_freq": 1.0, "duration": 6, "tags": ["home", "inward"] },
-    { "id": "Socialize", "base_freq": 1.0, "duration": 6, "tags": ["home", "social"] },
-    { "id": "BuildDwelling", "base_freq": 0.8, "duration": 6, "tags": ["home", "build"] },
-    { "id": "Patrol", "base_freq": 0.8, "duration": 6, "tags": ["work", "outward", "guard"] },
+    { "id": "Socialize", "base_freq": 1.0, "duration": 6, "tags": ["home", "social", "gathering"] },
+    { "id": "BuildDwelling", "base_freq": 0.8, "duration": 6, "tags": ["home", "build", "work"] },
+    { "id": "Patrol", "base_freq": 0.8, "duration": 6, "tags": ["work", "outward", "guard", "patrol"] },
     { "id": "MarkTerritory", "base_freq": 0.6, "duration": 6, "tags": ["outward", "guard"] },
-    { "id": "Wander", "base_freq": 1.0, "duration": 6, "tags": ["outward"] },
+    { "id": "Wander", "base_freq": 1.0, "duration": 6, "tags": ["outward", "wander"] },
     { "id": "Rest", "base_freq": 1.0, "duration": 6, "tags": ["home", "rest"] }
   ],
   "edges": [
