@@ -29,6 +29,14 @@ import {
   STAGE_BRAIN_IDS,
   STAGE_LIMITS,
 } from './engine/aging.ts';
+import {
+  buildChromosomeRegistry,
+  sampleChromosomes,
+  cloneAgentChromosomes,
+  cloneChromosomeRegistry,
+  type AgentChromosomes,
+  type ChromosomeRegistry,
+} from './engine/chromosomes.ts';
 import { resolveScenario, scenarioToSimulationDefaults } from './data/scenarios.ts';
 
 export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
@@ -57,7 +65,8 @@ export interface StageCounts {
 
 export interface AgentState extends MovableAgent, HouseAssignableAgent {
   ageTicks: number;
-  sexBody: 'male' | 'female';
+  chromosomes: AgentChromosomes;
+  reproductiveRoles: AgentChromosomes['roles'];
   genderIdentity: 'man' | 'woman' | 'nonbinary';
   fertility: number;
   pregnancy: PregnancyState | null;
@@ -88,6 +97,7 @@ export interface SimulationState {
   nextAgentId: number;
   scenarioId: string;
   seed: string;
+  chromosomeRegistry: ChromosomeRegistry;
 }
 
 export interface SimulationConfig {
@@ -130,7 +140,8 @@ interface SnapshotAgent {
   temperament: Temperament;
   ageTicks: number;
   speed: number;
-  sexBody: AgentState['sexBody'];
+  chromosomes: AgentState['chromosomes'];
+  reproductiveRoles: AgentState['reproductiveRoles'];
   genderIdentity: AgentState['genderIdentity'];
   bondPartnerId: string | null;
   parents: string[];
@@ -190,6 +201,7 @@ export interface Snapshot {
   demands: SnapshotDemand[];
   decisions: SnapshotDecision[];
   stats: StageCounts;
+  chromosomes: ChromosomeRegistry;
 }
 
 interface WorkerInitMessage {
@@ -466,7 +478,10 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   const collectivesStream = rootRng.stream('collectives');
 
   const world = createWorld(width, height, worldStream);
-  const agents = createAgents(agentCount, width, height, agentStream);
+  const chromosomeRegistry = buildChromosomeRegistry(
+    scenarioConfig.population?.chromosomes ?? null,
+  );
+  const agents = createAgents(agentCount, width, height, agentStream, chromosomeRegistry);
   const houses = createInitialHouses({
     width,
     height,
@@ -497,10 +512,17 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     nextAgentId: agents.length,
     scenarioId,
     seed: seedString,
+    chromosomeRegistry,
   };
 }
 
-function createAgents(count: number, width: number, height: number, stream: RngStream): AgentState[] {
+function createAgents(
+  count: number,
+  width: number,
+  height: number,
+  stream: RngStream,
+  chromosomeRegistry: ChromosomeRegistry,
+): AgentState[] {
   const agents: AgentState[] = [];
   const centerX = (width - 1) / 2;
   const centerY = (height - 1) / 2;
@@ -513,10 +535,13 @@ function createAgents(count: number, width: number, height: number, stream: RngS
     const traitProfile = createTraitProfile(temperament);
     brain.traitFlags = [...traitProfile.traitFlags];
     const brainMetadata = getCurrentNodeMetadata(brain);
-    const sexBody = stream.nextFloat() < 0.5 ? 'female' : 'male';
+    const chromosomes = sampleChromosomes(chromosomeRegistry, stream);
+    const reproductiveRoles = [...chromosomes.roles];
     const genderIdentity = sampleGenderIdentity(stream.nextFloat());
     const fertility =
-      lifeStage === 'adult' && sexBody === 'female' ? 0.4 + stream.nextFloat() * 0.5 : 0;
+      lifeStage === 'adult' && reproductiveRoles.includes('gestator')
+        ? 0.4 + stream.nextFloat() * 0.5
+        : 0;
     const baseSpeed = STAGE_BASE_SPEED[lifeStage] ?? 0;
     const speedVariance = lifeStage === 'baby' ? 0 : (stream.nextFloat() - 0.5) * 0.2;
     const ageLimit = STAGE_LIMITS[lifeStage];
@@ -540,7 +565,8 @@ function createAgents(count: number, width: number, height: number, stream: RngS
       brainMultipliers: buildBrainMultipliers(traitProfile),
       brainNodeDuration: brainMetadata.duration,
       brainDecision: null,
-      sexBody,
+      chromosomes,
+      reproductiveRoles,
       genderIdentity,
       fertility,
       pregnancy: null,
@@ -566,16 +592,21 @@ function createAgents(count: number, width: number, height: number, stream: RngS
     }
   });
 
-  const adultFemales = adults.filter((agent) => agent.sexBody === 'female');
-  const adultMales = adults.filter((agent) => agent.sexBody === 'male');
-  shuffleInPlace(adultFemales, stream);
-  shuffleInPlace(adultMales, stream);
-  const pairCount = Math.min(adultFemales.length, adultMales.length);
-  for (let i = 0; i < pairCount; i += 1) {
-    const female = adultFemales[i];
-    const male = adultMales[i];
-    female.bondPartnerId = male.id;
-    male.bondPartnerId = female.id;
+  const gestators = adults.filter((agent) => agent.reproductiveRoles.includes('gestator'));
+  const fertilizers = adults.filter((agent) => agent.reproductiveRoles.includes('fertilizer'));
+  shuffleInPlace(gestators, stream);
+  shuffleInPlace(fertilizers, stream);
+  const pairedFertilizers = new Set<string>();
+  for (const gestator of gestators) {
+    const partner = fertilizers.find(
+      (candidate) => candidate.id !== gestator.id && !pairedFertilizers.has(candidate.id),
+    );
+    if (!partner) {
+      continue;
+    }
+    gestator.bondPartnerId = partner.id;
+    partner.bondPartnerId = gestator.id;
+    pairedFertilizers.add(partner.id);
   }
 
   return agents;
@@ -742,6 +773,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
     demands: [],
     decisions: createSnapshotDecisions(simulation),
     stats: { ...simulation.stageCounts },
+    chromosomes: cloneChromosomeRegistry(simulation.chromosomeRegistry),
   };
 }
 
@@ -763,7 +795,8 @@ function createSnapshotAgent(agent: AgentState): SnapshotAgent {
     temperament: { ...agent.temperament },
     ageTicks: agent.ageTicks,
     speed: agent.speed,
-    sexBody: agent.sexBody,
+    chromosomes: cloneAgentChromosomes(agent.chromosomes),
+    reproductiveRoles: [...agent.reproductiveRoles],
     genderIdentity: agent.genderIdentity,
     bondPartnerId: agent.bondPartnerId,
     parents: [...agent.parents],

@@ -4,6 +4,11 @@ import type { CityState, HouseState } from '../engine/collectives.ts';
 import { restoreSeededRng } from '../engine/rng.ts';
 import { cloneBrainDecision, restoreBrainState } from '../engine/brain.ts';
 import {
+  cloneAgentChromosomes,
+  cloneChromosomeRegistry,
+  buildChromosomeRegistry,
+} from '../engine/chromosomes.ts';
+import {
   DB_NAME,
   DB_VERSION,
   STORE_NAME,
@@ -44,6 +49,10 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
   const agents = serialized.agents.map((agent) => restoreAgent(agent));
   const houses = serialized.houses.map((house) => restoreHouse(house));
   const city = serialized.city ? restoreCity(serialized.city) : null;
+  const registrySource = (serialized as Partial<SerializedSimulationState>).chromosomes;
+  const chromosomeRegistry = registrySource
+    ? cloneChromosomeRegistry(registrySource)
+    : buildChromosomeRegistry(null);
 
   return {
     tick: serialized.tick,
@@ -62,6 +71,7 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
     nextAgentId: serialized.nextAgentId,
     scenarioId: serialized.scenarioId,
     seed: serialized.seed,
+    chromosomeRegistry,
   };
 }
 
@@ -81,6 +91,24 @@ function restoreWorld(serialized: SerializedWorldState): WorldState {
 }
 
 function restoreAgent(serialized: SerializedAgentState): AgentState {
+  const chromosomesSource = (serialized as Partial<SerializedAgentState>).chromosomes;
+  let chromosomes: AgentState['chromosomes'];
+  if (chromosomesSource) {
+    chromosomes = cloneAgentChromosomes(chromosomesSource);
+  } else {
+    const legacySex = (serialized as { sexBody?: 'male' | 'female' }).sexBody;
+    const legacyRoles = legacySex === 'female' ? ['gestator'] : legacySex === 'male' ? ['fertilizer'] : [];
+    const legacyLabel = legacySex ?? 'Unknown';
+    chromosomes = {
+      code: legacyLabel,
+      label: legacyLabel,
+      roles: legacyRoles,
+    };
+  }
+  const reproductiveRoles = (serialized as Partial<SerializedAgentState>).reproductiveRoles
+    ? [...serialized.reproductiveRoles]
+    : [...chromosomes.roles];
+
   return {
     id: serialized.id,
     x: serialized.x,
@@ -96,7 +124,8 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     brainNodeDuration: serialized.brainNodeDuration,
     brainDecision: cloneBrainDecision(serialized.brainDecision),
     ageTicks: serialized.ageTicks,
-    sexBody: serialized.sexBody,
+    chromosomes,
+    reproductiveRoles,
     genderIdentity: serialized.genderIdentity,
     fertility: serialized.fertility,
     pregnancy: serialized.pregnancy

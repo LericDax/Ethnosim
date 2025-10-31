@@ -65,9 +65,10 @@ function transitionToStage(agent: AgentState, stage: LifeStage, tickStream: RngS
     agent.speed = STAGE_BASE_SPEED[stage as keyof typeof STAGE_BASE_SPEED];
   }
 
+  const isGestator = agent.reproductiveRoles.includes('gestator');
   if (stage === 'adult') {
-    agent.fertility = agent.sexBody === 'female' ? 0.4 + tickStream.nextFloat() * 0.5 : 0;
-  } else if (agent.sexBody === 'female') {
+    agent.fertility = isGestator ? 0.4 + tickStream.nextFloat() * 0.5 : 0;
+  } else if (isGestator) {
     agent.fertility = 0;
   }
 

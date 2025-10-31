@@ -24,6 +24,32 @@ export interface Temperament {
   zeal_bias: number;
 }
 
+export type ChromosomeRole = 'gestator' | 'fertilizer' | 'sterile';
+
+export interface ChromosomeDescriptor {
+  code: string;
+  label?: string;
+  roles: ChromosomeRole[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface SnapshotChromosomeRegistryEntry extends ChromosomeDescriptor {
+  label?: string;
+}
+
+export interface SnapshotChromosomeRegistry {
+  defaultCode: string;
+  entries: Record<string, SnapshotChromosomeRegistryEntry>;
+  spawnOrder: string[];
+  spawnWeights: Record<string, number>;
+}
+
+export interface ScenarioChromosomeConfig {
+  defaultCode: string;
+  options: ChromosomeDescriptor[];
+  spawnWeights?: Record<string, number>;
+}
+
 export interface ScenarioTerrain {
   town_radius: number;
   plain_radius: number;
@@ -56,6 +82,7 @@ export interface ScenarioConfig {
   tick: ScenarioTickConfig;
   population: {
     initial_adults: number;
+    chromosomes?: ScenarioChromosomeConfig;
   };
   authorities: {
     houses: ScenarioHouseAuthority[];
@@ -78,6 +105,8 @@ export interface SnapshotAgent {
   brain_node: string | null;
   house_id: string;
   pregnant: boolean;
+  chromosomes?: ChromosomeDescriptor;
+  reproductive_roles?: ChromosomeRole[];
 }
 
 export interface SnapshotHouse {
@@ -126,4 +155,5 @@ export interface SnapshotMetadata {
   city: SnapshotCity | null;
   demands: SnapshotDemand[];
   stats: SnapshotStageStats;
+  chromosomes?: SnapshotChromosomeRegistry;
 }

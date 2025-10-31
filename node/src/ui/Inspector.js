@@ -305,7 +305,8 @@ export class Inspector {
     const identityData = {
       'Agent ID': agent?.id ?? '–',
       'Life stage': agent?.lifeStage ?? agent?.ageStage ?? '–',
-      'Body sex': agent?.sexBody ?? agent?.sex_body ?? '–',
+      Chromosomes: this._formatChromosomes(agent),
+      'Reproductive roles': this._formatReproductiveRoles(agent),
       'Gender identity': agent?.genderIdentity ?? agent?.gender_identity ?? '–',
       Brain: brainSummary?.brainId ?? agent?.brain_name ?? fallbackBrainId ?? '–',
       'Current node':
@@ -340,6 +341,93 @@ export class Inspector {
       agent?.temperament,
       agent?.pregnancy?.fetusTemperament,
     );
+  }
+
+  _formatChromosomes(agent) {
+    if (!agent) {
+      return '–';
+    }
+    const source =
+      agent.chromosomes ??
+      agent.chromosome ??
+      agent.chromosomeDescriptor ??
+      agent.chromosome_descriptor ??
+      null;
+
+    let label = null;
+    let code = null;
+
+    if (source && typeof source === 'object') {
+      const display = typeof source.display === 'string' ? source.display.trim() : '';
+      const candidateLabel =
+        typeof source.label === 'string' && source.label.trim().length > 0
+          ? source.label.trim()
+          : display.length > 0
+          ? display
+          : null;
+      const candidateCode =
+        typeof source.code === 'string' && source.code.trim().length > 0
+          ? source.code.trim()
+          : typeof source.id === 'string' && source.id.trim().length > 0
+          ? source.id.trim()
+          : typeof source.name === 'string' && source.name.trim().length > 0
+          ? source.name.trim()
+          : null;
+      label = candidateLabel ?? candidateCode;
+      code = candidateCode;
+    } else if (typeof source === 'string' && source.trim().length > 0) {
+      label = source.trim();
+    }
+
+    if (!label) {
+      const legacy = agent.sexBody ?? agent.sex_body ?? null;
+      if (typeof legacy === 'string' && legacy.trim().length > 0) {
+        label = legacy.trim();
+      }
+    }
+
+    if (!label) {
+      return '–';
+    }
+    if (code && label !== code) {
+      return `${label} (${code})`;
+    }
+    return label;
+  }
+
+  _formatReproductiveRoles(agent) {
+    const roleSources = [
+      Array.isArray(agent?.reproductiveRoles) ? agent.reproductiveRoles : null,
+      Array.isArray(agent?.reproductive_roles) ? agent.reproductive_roles : null,
+      Array.isArray(agent?.chromosomes?.roles) ? agent.chromosomes.roles : null,
+      Array.isArray(agent?.chromosome?.roles) ? agent.chromosome.roles : null,
+    ];
+
+    const roles = roleSources.find((list) => Array.isArray(list) && list.length > 0) ?? [];
+    if (roles.length === 0) {
+      const legacy = agent?.sexBody ?? agent?.sex_body ?? null;
+      if (typeof legacy === 'string' && legacy.trim().length > 0) {
+        return legacy.charAt(0).toUpperCase() + legacy.slice(1);
+      }
+      return '–';
+    }
+
+    const formatted = roles
+      .map((role) => this._formatRoleLabel(role))
+      .filter((value) => typeof value === 'string' && value.length > 0);
+
+    return formatted.length > 0 ? formatted.join(', ') : '–';
+  }
+
+  _formatRoleLabel(role) {
+    if (typeof role !== 'string') {
+      return null;
+    }
+    const trimmed = role.trim();
+    if (!trimmed) {
+      return null;
+    }
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
   }
 
   _renderHouse(house) {
