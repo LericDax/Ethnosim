@@ -29,11 +29,13 @@ import {
   HOUSE_CONSTRUCTION_COST,
   HOUSE_CONSTRUCTION_COOLDOWN,
   HOUSE_CONSTRUCTION_RETRY_DELAY,
+  cloneLeaderDescriptor,
   type HouseAssignableAgent,
   type HouseState,
   type CityState,
   type ResourceBundle,
   type ResourceType,
+  type CollectiveLeaderDescriptor,
 } from './engine/collectives.ts';
 import {
   stepAging,
@@ -81,6 +83,12 @@ export interface AgentResourceActivity {
   delivered?: ResourceBundle;
 }
 
+export interface LeadershipSummary {
+  houses: Record<string, CollectiveLeaderDescriptor[]>;
+  city: CollectiveLeaderDescriptor[];
+  updatedAtTick: number;
+}
+
 export interface AgentState extends MovableAgent, HouseAssignableAgent {
   ageTicks: number;
   chromosomes: AgentChromosomes;
@@ -123,6 +131,7 @@ export interface SimulationState {
   scenarioId: string;
   seed: string;
   chromosomeRegistry: ChromosomeRegistry;
+  leadership: LeadershipSummary;
 }
 
 export interface SimulationConfig {
@@ -199,6 +208,19 @@ interface SnapshotAgentResourceActivity {
   delivered?: SnapshotResourceBundle;
 }
 
+interface SnapshotLeader {
+  agentId: string;
+  role: string;
+  title: string;
+  method: string;
+  score: number;
+  support: number;
+  selectedAtTick: number;
+  temperament: Temperament;
+  traitFlags: string[];
+  notes?: string;
+}
+
 interface SnapshotHouseConstruction {
   active: boolean;
   progress: number;
@@ -217,6 +239,9 @@ interface SnapshotHouse {
   demand: Record<string, number>;
   stockpiles: SnapshotResourceBundle;
   construction: SnapshotHouseConstruction;
+  primaryLeaderId: string | null;
+  leaders: SnapshotLeader[];
+  leaderDirectives: Record<string, number>;
 }
 
 interface SnapshotCity {
@@ -229,6 +254,9 @@ interface SnapshotCity {
   demand: Record<string, number>;
   demandExpiresAt: number;
   stockpiles: SnapshotResourceBundle;
+  primaryLeaderId: string | null;
+  leaders: SnapshotLeader[];
+  leaderDirectives: Record<string, number>;
 }
 
 interface SnapshotDecision {
@@ -265,6 +293,13 @@ export interface Snapshot {
   stats: StageCounts;
   chromosomes: ChromosomeRegistry;
   reproductiveGroups: SnapshotReproductiveGroup[];
+  leadership: SnapshotLeadershipState;
+}
+
+interface SnapshotLeadershipState {
+  houses: Record<string, SnapshotLeader[]>;
+  city: SnapshotLeader[];
+  updatedAtTick: number;
 }
 
 interface WorkerInitMessage {
@@ -579,6 +614,11 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     scenarioId,
     seed: seedString,
     chromosomeRegistry,
+    leadership: {
+      houses: buildLeadershipHouseMap(houses),
+      city: city ? city.leaders.map((leader) => cloneLeaderDescriptor(leader)) : [],
+      updatedAtTick: 0,
+    },
   };
 
   matchReproductivePartners(simulation);
@@ -718,6 +758,29 @@ function buildInitialMoodState(profile: ReturnType<typeof createTraitProfile>): 
   return { ...profile.moodLevels };
 }
 
+function cloneLeadershipArray(leaders: CollectiveLeaderDescriptor[]): CollectiveLeaderDescriptor[] {
+  if (!Array.isArray(leaders) || leaders.length === 0) {
+    return [];
+  }
+  return leaders.map((leader) => cloneLeaderDescriptor(leader));
+}
+
+function buildLeadershipHouseMap(houses: HouseState[]): Record<string, CollectiveLeaderDescriptor[]> {
+  const map: Record<string, CollectiveLeaderDescriptor[]> = {};
+  for (const house of houses) {
+    map[house.id] = cloneLeadershipArray(house.leaders);
+  }
+  return map;
+}
+
+function updateLeadershipLedger(simulation: SimulationState): void {
+  simulation.leadership = {
+    houses: buildLeadershipHouseMap(simulation.houses),
+    city: simulation.city ? cloneLeadershipArray(simulation.city.leaders) : [],
+    updatedAtTick: simulation.tick,
+  };
+}
+
 function computeStageCounts(agents: AgentState[]): StageCounts {
   const counts: StageCounts = { baby: 0, child: 0, teen: 0, adult: 0 };
   for (const agent of agents) {
@@ -750,8 +813,14 @@ export function stepSimulationState(simulation: SimulationState): void {
   matchReproductivePartners(simulation);
   handleReproduction(simulation);
 
-  assignAgentsToHouses(simulation.houses, simulation.agents);
-  updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick);
+  assignAgentsToHouses(simulation.houses, simulation.agents, {
+    currentTick: simulation.tick,
+    rng: simulation.rng.collectives,
+  });
+  updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
+    rng: simulation.rng.collectives,
+  });
+  updateLeadershipLedger(simulation);
 
   let trackedAgentFound = false;
 
@@ -1164,6 +1233,7 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
     reproductiveGroups: simulation.reproductiveGroups.map((group) =>
       createSnapshotReproductiveGroup(group),
     ),
+    leadership: createSnapshotLeadership(simulation),
   };
 }
 
@@ -1217,6 +1287,9 @@ function createSnapshotHouse(house: HouseState): SnapshotHouse {
     demand: { ...house.activeDemand },
     stockpiles: cloneResourceBundle(house.stockpiles),
     construction: cloneHouseConstruction(house.construction),
+    primaryLeaderId: house.primaryLeaderId,
+    leaders: house.leaders.map((leader) => createSnapshotLeader(leader)),
+    leaderDirectives: { ...house.leaderDirectives },
   };
 }
 
@@ -1231,6 +1304,36 @@ function createSnapshotCity(city: CityState): SnapshotCity {
     demand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
     stockpiles: cloneResourceBundle(city.stockpiles),
+    primaryLeaderId: city.primaryLeaderId,
+    leaders: city.leaders.map((leader) => createSnapshotLeader(leader)),
+    leaderDirectives: { ...city.leaderDirectives },
+  };
+}
+
+function createSnapshotLeader(leader: CollectiveLeaderDescriptor): SnapshotLeader {
+  return {
+    agentId: leader.agentId,
+    role: leader.role,
+    title: leader.title,
+    method: leader.method,
+    score: leader.score,
+    support: leader.support,
+    selectedAtTick: leader.selectedAtTick,
+    temperament: { ...leader.temperament },
+    traitFlags: [...leader.traitFlags],
+    notes: leader.notes,
+  };
+}
+
+function createSnapshotLeadership(simulation: SimulationState): SnapshotLeadershipState {
+  const houses: Record<string, SnapshotLeader[]> = {};
+  for (const house of simulation.houses) {
+    houses[house.id] = house.leaders.map((leader) => createSnapshotLeader(leader));
+  }
+  return {
+    houses,
+    city: simulation.city ? simulation.city.leaders.map((leader) => createSnapshotLeader(leader)) : [],
+    updatedAtTick: simulation.leadership?.updatedAtTick ?? simulation.tick,
   };
 }
 

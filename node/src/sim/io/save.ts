@@ -6,7 +6,9 @@ import type { WorldState } from '../engine/world.ts';
 import type { AgentState, PregnancyState } from '../sim.worker.ts';
 import {
   HOUSE_CONSTRUCTION_COST,
+  cloneLeaderDescriptor,
   type CityState,
+  type CollectiveLeaderDescriptor,
   type HouseState,
   type ResourceBundle,
   type ResourceType,
@@ -72,6 +74,9 @@ export interface SerializedHouseState {
   activeDemand: Record<string, number>;
   stockpiles: HouseState['stockpiles'];
   construction: HouseState['construction'];
+  primaryLeaderId: string | null;
+  leaders: CollectiveLeaderDescriptor[];
+  leaderDirectives: Record<string, number>;
 }
 
 export interface SerializedCityState {
@@ -85,6 +90,9 @@ export interface SerializedCityState {
   activeDemand: Record<string, number>;
   demandExpiresAt: number;
   stockpiles: CityState['stockpiles'];
+  primaryLeaderId: string | null;
+  leaders: CollectiveLeaderDescriptor[];
+  leaderDirectives: Record<string, number>;
 }
 
 export interface SerializedTerrainLayer {
@@ -130,6 +138,13 @@ export interface SerializedSimulationState {
   reproductiveGroups: SerializedReproductiveGroup[];
   nextReproductiveGroupId: number;
   chromosomes: ChromosomeRegistry;
+  leadership: SerializedLeadershipState;
+}
+
+export interface SerializedLeadershipState {
+  houses: Record<string, CollectiveLeaderDescriptor[]>;
+  city: CollectiveLeaderDescriptor[];
+  updatedAtTick: number;
 }
 
 export interface PersistedSnapshotRecord {
@@ -158,6 +173,7 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     reproductiveGroups: state.reproductiveGroups.map((group) => serializeReproductiveGroup(group)),
     nextReproductiveGroupId: state.nextReproductiveGroupId,
     chromosomes: cloneChromosomeRegistry(state.chromosomeRegistry),
+    leadership: serializeLeadership(state.leadership),
   };
 }
 
@@ -255,6 +271,9 @@ function serializeHouse(house: HouseState): SerializedHouseState {
       required: house.construction?.required ?? HOUSE_CONSTRUCTION_COST,
       cooldownUntil: house.construction?.cooldownUntil ?? 0,
     },
+    primaryLeaderId: house.primaryLeaderId,
+    leaders: house.leaders.map((leader) => cloneLeaderDescriptor(leader)),
+    leaderDirectives: { ...house.leaderDirectives },
   };
 }
 
@@ -270,6 +289,25 @@ function serializeCity(city: CityState): SerializedCityState {
     activeDemand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
     stockpiles: cloneResourceBundle(city.stockpiles),
+    primaryLeaderId: city.primaryLeaderId,
+    leaders: city.leaders.map((leader) => cloneLeaderDescriptor(leader)),
+    leaderDirectives: { ...city.leaderDirectives },
+  };
+}
+
+function serializeLeadership(source: SimulationState['leadership']): SerializedLeadershipState {
+  const houses: Record<string, CollectiveLeaderDescriptor[]> = {};
+  for (const [houseId, leaders] of Object.entries(source.houses ?? {})) {
+    houses[houseId] = Array.isArray(leaders)
+      ? leaders.map((leader) => cloneLeaderDescriptor(leader))
+      : [];
+  }
+  return {
+    houses,
+    city: Array.isArray(source.city)
+      ? source.city.map((leader) => cloneLeaderDescriptor(leader))
+      : [],
+    updatedAtTick: source.updatedAtTick ?? 0,
   };
 }
 
