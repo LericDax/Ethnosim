@@ -13,6 +13,8 @@ import {
   type HouseState,
   type ResourceBundle,
   type ResourceType,
+  serializeHouseCapacityController,
+  type SerializedHouseCapacityController,
 } from '../engine/collectives.ts';
 import {
   cloneAgentChromosomes,
@@ -82,6 +84,10 @@ export interface SerializedHouseState {
   x: number;
   y: number;
   radius: number;
+  maxMembers: number;
+  preferredMembers: number | null;
+  capacityPressure: number;
+  archetypeId: string | null;
   brain: SerializedBrainState;
   brainNodeDuration: number;
   brainDecision: BrainDecision | null;
@@ -154,6 +160,8 @@ export interface SerializedSimulationState {
   nextReproductiveGroupId: number;
   chromosomes: ChromosomeRegistry;
   leadership: SerializedLeadershipState;
+  housing: SerializedHouseCapacityController;
+  pendingHouseAssignments: string[];
 }
 
 export interface SerializedLeadershipState {
@@ -189,6 +197,8 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     nextReproductiveGroupId: state.nextReproductiveGroupId,
     chromosomes: cloneChromosomeRegistry(state.chromosomeRegistry),
     leadership: serializeLeadership(state.leadership),
+    housing: serializeHouseCapacityController(state.housing),
+    pendingHouseAssignments: [...state.pendingHouseAssignments],
   };
 }
 
@@ -290,6 +300,10 @@ function serializeHouse(house: HouseState): SerializedHouseState {
     x: house.x,
     y: house.y,
     radius: house.radius,
+    maxMembers: house.maxMembers,
+    preferredMembers: house.preferredMembers,
+    capacityPressure: house.capacityPressure,
+    archetypeId: house.archetypeId,
     brain: serializeBrainState(house.brain),
     brainNodeDuration: house.brainNodeDuration,
     brainDecision: cloneBrainDecision(house.brainDecision),
