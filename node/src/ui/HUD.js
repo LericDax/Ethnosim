@@ -5,6 +5,7 @@ const MIN_TICK_INTERVAL = 50;
 const MAX_TICK_INTERVAL = 4000;
 const MIN_TICKS_PER_UPDATE = 1;
 const MAX_TICKS_PER_UPDATE = 50;
+const OVERLAY_LAYOUT_BREAKPOINT = 1200;
 
 function clamp(value, min, max) {
   if (!Number.isFinite(value)) return min;
@@ -89,6 +90,12 @@ export class HUD {
     this._buildHeatmapControls();
     this._buildCollectiveControls();
 
+    this._handleResize = () => {
+      this._updateOverlayLayout();
+    };
+    this._updateOverlayLayout();
+    window.addEventListener('resize', this._handleResize);
+
     this._handleSceneSelectionChange = this._handleSceneSelectionChange.bind(this);
     if (typeof this.scene.onSelectionChange === 'function') {
       this._detachSceneSelectionListener = this.scene.onSelectionChange(
@@ -153,6 +160,20 @@ export class HUD {
       paddingRight: '8px',
       zIndex: '100',
     });
+  }
+
+  _updateOverlayLayout() {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (window.innerWidth >= OVERLAY_LAYOUT_BREAKPOINT) {
+      this.host.style.flexDirection = 'row';
+      this.host.style.alignItems = 'flex-start';
+    } else {
+      this.host.style.flexDirection = 'column';
+      this.host.style.alignItems = 'stretch';
+    }
   }
 
   _applyRootStyles() {
