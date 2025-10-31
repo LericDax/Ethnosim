@@ -46,8 +46,39 @@ function computeDataSignature(data) {
   return `${nodePart}__${edgePart}__${current}__${decision}`;
 }
 
+function resolveClampValue(viewportClamp, minHeight) {
+  if (!viewportClamp) return null;
+
+  if (typeof viewportClamp === 'string') {
+    return viewportClamp.trim() || null;
+  }
+
+  if (typeof viewportClamp === 'object') {
+    const min = viewportClamp.min ?? minHeight;
+    const max = viewportClamp.max ?? null;
+    const viewport = viewportClamp.viewport ?? viewportClamp.preferred ?? viewportClamp.ideal;
+
+    const minPart = typeof min === 'number' ? `${min}px` : String(min ?? `${minHeight}px`);
+    const viewportPart = viewport ? (typeof viewport === 'number' ? `${viewport}vh` : String(viewport)) : null;
+    const maxPart = max != null ? (typeof max === 'number' ? `${max}px` : String(max)) : null;
+
+    if (viewportPart && maxPart) {
+      return `clamp(${minPart}, ${viewportPart}, ${maxPart})`;
+    }
+    if (viewportPart) {
+      return `clamp(${minPart}, ${viewportPart}, ${viewportPart})`;
+    }
+    if (maxPart) {
+      return `clamp(${minPart}, ${maxPart}, ${maxPart})`;
+    }
+    return minPart;
+  }
+
+  return null;
+}
+
 export class BrainViewer {
-  constructor({ minHeight = 220 } = {}) {
+  constructor({ minHeight = 220, viewportClamp = null } = {}) {
     this.root = document.createElement('div');
     Object.assign(this.root.style, {
       position: 'relative',
@@ -59,6 +90,12 @@ export class BrainViewer {
       background: '#020617',
       boxShadow: '0 12px 32px rgba(2, 6, 23, 0.45)',
     });
+
+    const clampValue = resolveClampValue(viewportClamp, minHeight);
+    if (clampValue) {
+      this.root.style.height = clampValue;
+      this.root.style.maxHeight = clampValue;
+    }
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.width = '100%';
