@@ -647,6 +647,8 @@ export class Inspector {
       currentNodeId,
       decision,
       transition: summary?.transition ?? null,
+      pulses: Array.isArray(brainData?.pulses) ? brainData.pulses : [],
+      fillRatios: brainData?.fillRatios ?? null,
     });
     this.brainSection.root.style.display = 'flex';
   }

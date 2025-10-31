@@ -15,6 +15,15 @@ const PARTICLE_DECISION_COLOR = '#fef08a';
 const GRID_COLOR = 'rgba(15, 118, 110, 0.08)';
 const GRID_STEP = 14;
 
+function clamp01(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (value <= 0) return 0;
+  if (value >= 1) return 1;
+  return value;
+}
+
 function createScanlineOverlay() {
   const overlay = document.createElement('div');
   Object.assign(overlay.style, {
@@ -43,7 +52,22 @@ function computeDataSignature(data) {
   const decision = data.decision
     ? `${data.decision.fromNodeId ?? ''}->${data.decision.chosenNodeId ?? ''}|${(data.decision.candidates ?? []).length}`
     : 'none';
-  return `${nodePart}__${edgePart}__${current}__${decision}`;
+  const pulsesPart = Array.isArray(data.pulses)
+    ? data.pulses
+        .map((pulse) =>
+          `${pulse?.edgeId ?? ''}:${Number(pulse?.progress ?? 0).toFixed(3)}:${Number(pulse?.strength ?? 0).toFixed(3)}`,
+        )
+        .sort()
+        .join(';')
+    : 'none';
+  const fillRatios = data.fillRatios && typeof data.fillRatios === 'object' ? data.fillRatios : null;
+  const fillPart = fillRatios
+    ? Object.entries(fillRatios)
+        .map(([nodeId, value]) => `${nodeId}:${Number(value ?? 0).toFixed(3)}`)
+        .sort()
+        .join(';')
+    : 'none';
+  return `${nodePart}__${edgePart}__${current}__${decision}__${pulsesPart}__${fillPart}`;
 }
 
 function resolveClampValue(viewportClamp, minHeight) {
@@ -150,6 +174,7 @@ export class BrainViewer {
     this._nodePositions = new Map();
     this._edgeSegments = [];
     this._nodeDurations = new Map();
+    this._nodeFillRatios = new Map();
     this._activePulses = [];
     this._pixelRatio = window.devicePixelRatio || 1;
     this._width = 0;
@@ -199,10 +224,18 @@ export class BrainViewer {
     if (transition) {
       this._lastTickDurationMs = this._resolveTickDurationMs(transition);
     }
-    const signature = computeDataSignature(data);
+
+    const pulses = Array.isArray(data?.pulses) ? data.pulses : [];
+    const fillRatios = data && typeof data.fillRatios === 'object' ? data.fillRatios : null;
+    const signatureSource = data
+      ? { ...data, pulses, fillRatios: fillRatios ?? undefined }
+      : data;
+    const signature = computeDataSignature(signatureSource);
     if (signature === this._dataSignature) {
       this._transitionTiming = transition;
+      this._applyFillRatios(fillRatios);
       this._updateDecisionState(data?.decision ?? null, transition);
+      this._ingestSnapshotPulses(pulses, transition);
       return;
     }
 
@@ -229,6 +262,7 @@ export class BrainViewer {
       this._nodePositions.clear();
       this._edgeSegments = [];
       this._nodeDurations.clear();
+      this._nodeFillRatios.clear();
       this._activePulses = [];
       this._decisionEdgeKey = 'none';
       this._decisionPulse = 0;
@@ -260,10 +294,12 @@ export class BrainViewer {
       this._orderedNodes.map((node) => [node.id, this._sanitizeDuration(node.duration)]),
     );
     this._activePulses = [];
+    this._applyFillRatios(fillRatios);
     this._needsLayout = true;
     this._needsRedraw = true;
     this._transitionTiming = transition;
     this._updateDecisionState(this._data.decision ?? null, transition, true);
+    this._ingestSnapshotPulses(pulses, transition);
 
     if (this._isPaused) {
       if (this._needsLayout) {
@@ -324,6 +360,20 @@ export class BrainViewer {
       return 1;
     }
     return numeric;
+  }
+
+  _applyFillRatios(fillRatios) {
+    this._nodeFillRatios.clear();
+    if (!fillRatios || typeof fillRatios !== 'object') {
+      return;
+    }
+    const entries = Object.entries(fillRatios)
+      .filter(([, value]) => Number.isFinite(value) && value > 0)
+      .map(([nodeId, value]) => ({ nodeId, value: clamp01(Number(value)) }));
+    entries.sort((a, b) => b.value - a.value);
+    for (const entry of entries) {
+      this._nodeFillRatios.set(entry.nodeId, entry.value);
+    }
   }
 
   _resolveTickDurationMs(timing) {
@@ -526,6 +576,49 @@ export class BrainViewer {
     this._activePulses = active;
   }
 
+  _ingestSnapshotPulses(pulses, timing) {
+    const decisionPulses = this._activePulses.filter((pulse) => pulse.kind === 'decision');
+    if (!Array.isArray(pulses) || pulses.length === 0) {
+      this._activePulses = decisionPulses;
+      this._needsRedraw = true;
+      return;
+    }
+
+    const tickDurationMs = this._resolveTickDurationMs(timing);
+    const baseDurationMs = Math.max(tickDurationMs, tickDurationMs * 4);
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+    const snapshotPulses = pulses
+      .map((pulse, index) => {
+        const edgeId = pulse?.edgeId;
+        if (!edgeId) {
+          return null;
+        }
+        const progress = clamp01(Number(pulse.progress ?? 0));
+        const strength = clamp01(Number(pulse.strength ?? 0));
+        const durationMs = baseDurationMs;
+        const startedAt = durationMs > 0 ? now - progress * durationMs : now;
+        return {
+          id: `snapshot-${index}-${edgeId}`,
+          kind: 'snapshot',
+          edgeId,
+          fromNodeId: null,
+          toNodeId: null,
+          startedAt,
+          durationTicks: 1,
+          durationMs,
+          progress,
+          appearance: this._createSnapshotPulseAppearance(strength),
+          segment: null,
+          strength,
+        };
+      })
+      .filter(Boolean);
+
+    this._activePulses = decisionPulses.concat(snapshotPulses);
+    this._needsRedraw = true;
+  }
+
   _createPulseAppearance(kind) {
     if (kind === 'decision') {
       return {
@@ -542,6 +635,15 @@ export class BrainViewer {
       color: PARTICLE_COLOR,
       opacity: 0.78,
       size: 2.6,
+    };
+  }
+
+  _createSnapshotPulseAppearance(strength) {
+    const ratio = clamp01(Number(strength));
+    return {
+      color: PARTICLE_COLOR,
+      opacity: 0.45 + ratio * 0.35,
+      size: 2.1 + ratio * 2.6,
     };
   }
 
@@ -601,7 +703,7 @@ export class BrainViewer {
     }
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     for (const pulse of this._activePulses) {
-      if (pulse.edgeId === edgeId) {
+      if (pulse.edgeId === edgeId && pulse.kind !== 'snapshot') {
         this._syncPulseWithTiming(pulse, timing, now);
       }
     }
@@ -760,12 +862,30 @@ export class BrainViewer {
       if (!position) continue;
       const isCurrent = node.id === currentNodeId;
       const radius = isCurrent ? 13 : 10;
+      const fillRatio = this._nodeFillRatios.get(node.id) ?? 0;
       ctx.save();
       ctx.beginPath();
       ctx.arc(position.x, position.y, radius, 0, Math.PI * 2);
       ctx.fillStyle = isCurrent ? NODE_HIGHLIGHT_FILL : NODE_FILL;
       ctx.globalAlpha = isCurrent ? 0.95 : 0.9;
       ctx.fill();
+      if (fillRatio > 0) {
+        const wedgeRadius = Math.max(2, radius - 2);
+        ctx.beginPath();
+        ctx.moveTo(position.x, position.y);
+        ctx.arc(
+          position.x,
+          position.y,
+          wedgeRadius,
+          -Math.PI / 2,
+          -Math.PI / 2 + fillRatio * Math.PI * 2,
+          false,
+        );
+        ctx.closePath();
+        ctx.fillStyle = isCurrent ? 'rgba(250, 204, 21, 0.6)' : 'rgba(56, 189, 248, 0.55)';
+        ctx.globalAlpha = 0.45 + fillRatio * 0.45;
+        ctx.fill();
+      }
       ctx.lineWidth = isCurrent ? 2 : 1.5;
       ctx.strokeStyle = isCurrent ? NODE_HIGHLIGHT_STROKE : NODE_STROKE;
       ctx.globalAlpha = 1;
