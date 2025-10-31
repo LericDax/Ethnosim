@@ -2,7 +2,9 @@ import type { SimulationState, AgentState } from '../sim.worker.ts';
 import type { WorldState } from '../engine/world.ts';
 import {
   HOUSE_CONSTRUCTION_COST,
+  cloneLeaderDescriptor,
   type CityState,
+  type CollectiveLeaderDescriptor,
   type HouseState,
   type ResourceBundle,
   type ResourceType,
@@ -25,6 +27,7 @@ import {
   type SerializedSimulationState,
   type SerializedWorldState,
   type SerializedReproductiveGroup,
+  type SerializedLeadershipState,
 } from './save.ts';
 import { matchReproductivePartners } from '../engine/repro.ts';
 import type { ReproductiveGroup } from '../engine/repro.ts';
@@ -71,6 +74,12 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
   const nextHouseId =
     (serialized as Partial<SerializedSimulationState>).nextHouseId ?? inferNextHouseId(houses);
 
+  const leadership = restoreLeadership(
+    (serialized as Partial<SerializedSimulationState>).leadership,
+    houses,
+    city,
+  );
+
   const simulation: SimulationState = {
     tick: serialized.tick,
     world,
@@ -92,6 +101,7 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
     scenarioId: serialized.scenarioId,
     seed: serialized.seed,
     chromosomeRegistry,
+    leadership,
   };
 
   matchReproductivePartners(simulation);
@@ -232,6 +242,9 @@ function restoreHouse(serialized: SerializedHouseState): HouseState {
     activeDemand: { ...serialized.activeDemand },
     stockpiles: cloneResourceBundle(serialized.stockpiles),
     construction: restoreHouseConstruction(serialized.construction),
+    primaryLeaderId: serialized.primaryLeaderId ?? null,
+    leaders: cloneLeadershipDescriptors(serialized.leaders),
+    leaderDirectives: cloneDirectiveMap(serialized.leaderDirectives),
   };
 }
 
@@ -247,6 +260,9 @@ function restoreCity(serialized: SerializedCityState): CityState {
     activeDemand: { ...serialized.activeDemand },
     demandExpiresAt: serialized.demandExpiresAt,
     stockpiles: cloneResourceBundle(serialized.stockpiles),
+    primaryLeaderId: serialized.primaryLeaderId ?? null,
+    leaders: cloneLeadershipDescriptors(serialized.leaders),
+    leaderDirectives: cloneDirectiveMap(serialized.leaderDirectives),
   };
 }
 
@@ -263,6 +279,59 @@ function cloneResourceBundle(bundle: ResourceBundle | null | undefined): Resourc
     clone[key as ResourceType] = Math.max(0, numeric);
   }
   return clone;
+}
+
+function cloneLeadershipDescriptors(
+  leaders: CollectiveLeaderDescriptor[] | null | undefined,
+): CollectiveLeaderDescriptor[] {
+  if (!Array.isArray(leaders) || leaders.length === 0) {
+    return [];
+  }
+  return leaders.map((leader) => cloneLeaderDescriptor(leader));
+}
+
+function cloneDirectiveMap(source: Record<string, number> | null | undefined): Record<string, number> {
+  const map: Record<string, number> = {};
+  if (!source) {
+    return map;
+  }
+  for (const [key, value] of Object.entries(source)) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      continue;
+    }
+    map[key] = numeric;
+  }
+  return map;
+}
+
+function restoreLeadership(
+  serialized: SerializedLeadershipState | undefined,
+  houses: HouseState[],
+  city: CityState | null,
+): SimulationState['leadership'] {
+  if (serialized) {
+    const housesMap: Record<string, CollectiveLeaderDescriptor[]> = {};
+    for (const [houseId, leaders] of Object.entries(serialized.houses ?? {})) {
+      housesMap[houseId] = cloneLeadershipDescriptors(leaders);
+    }
+    return {
+      houses: housesMap,
+      city: cloneLeadershipDescriptors(serialized.city),
+      updatedAtTick: serialized.updatedAtTick ?? 0,
+    };
+  }
+
+  const derivedHouses: Record<string, CollectiveLeaderDescriptor[]> = {};
+  for (const house of houses) {
+    derivedHouses[house.id] = cloneLeadershipDescriptors(house.leaders);
+  }
+
+  return {
+    houses: derivedHouses,
+    city: city ? cloneLeadershipDescriptors(city.leaders) : [],
+    updatedAtTick: 0,
+  };
 }
 
 function cloneAgentResourceActivity(

@@ -51,6 +51,7 @@ export interface Snapshot {
   agents?: SnapshotAgent[];
   houses?: SnapshotHouse[];
   city?: SnapshotCity | null;
+  leadership?: SnapshotLeadership;
 }
 
 export interface SnapshotHouse {
@@ -69,6 +70,9 @@ export interface SnapshotHouse {
     required?: number;
     cooldownUntil?: number;
   } | null;
+  primaryLeaderId?: string | null;
+  leaders?: SnapshotLeader[];
+  leaderDirectives?: Record<string, number>;
 }
 
 export interface SnapshotCity {
@@ -81,6 +85,9 @@ export interface SnapshotCity {
   demand: Record<string, number>;
   demandExpiresAt: number;
   stockpiles?: Record<string, number>;
+  primaryLeaderId?: string | null;
+  leaders?: SnapshotLeader[];
+  leaderDirectives?: Record<string, number>;
 }
 
 export interface SnapshotBrainData {
@@ -96,6 +103,25 @@ export interface SnapshotBrainData {
     currentNodeId?: string;
     lastDecision?: unknown;
   } | null;
+}
+
+export interface SnapshotLeader {
+  agentId: string;
+  role?: string;
+  title?: string;
+  method?: string;
+  score?: number;
+  support?: number;
+  selectedAtTick?: number;
+  temperament?: Record<string, number>;
+  traitFlags?: string[];
+  notes?: string;
+}
+
+export interface SnapshotLeadership {
+  houses?: Record<string, SnapshotLeader[]>;
+  city?: SnapshotLeader[];
+  updatedAtTick?: number;
 }
 
 export interface MapSelection {

@@ -116,6 +116,8 @@ export interface SnapshotHouse {
   authority: number;
   members: string[];
   brain_node: string | null;
+  primary_leader_id?: string | null;
+  leaders?: SnapshotLeader[];
 }
 
 export interface SnapshotCity {
@@ -124,6 +126,21 @@ export interface SnapshotCity {
   y: number;
   authority: number;
   brain_node: string | null;
+  primary_leader_id?: string | null;
+  leaders?: SnapshotLeader[];
+}
+
+export interface SnapshotLeader {
+  agent_id: string;
+  role?: string;
+  title?: string;
+  method?: string;
+  score?: number;
+  support?: number;
+  selected_at_tick?: number;
+  temperament?: Record<string, number>;
+  trait_flags?: string[];
+  notes?: string;
 }
 
 export type DemandScope = 'agent' | 'house' | 'city' | 'terrain';
@@ -156,4 +173,11 @@ export interface SnapshotMetadata {
   demands: SnapshotDemand[];
   stats: SnapshotStageStats;
   chromosomes?: SnapshotChromosomeRegistry;
+  leadership?: SnapshotLeadershipSummary;
+}
+
+export interface SnapshotLeadershipSummary {
+  houses?: Record<string, SnapshotLeader[]>;
+  city?: SnapshotLeader[];
+  updated_at_tick?: number;
 }

@@ -16,6 +16,9 @@
  * @property {string[]} members
  * @property {Object<string, number>=} stockpiles
  * @property {{active?: boolean, progress?: number, required?: number, cooldownUntil?: number}=} construction
+ * @property {string=} primaryLeaderId
+ * @property {SnapshotLeader[]=} leaders
+ * @property {Object<string, number>=} leaderDirectives
  */
 
 /**
@@ -25,6 +28,23 @@
  * @property {number} y
  * @property {string[]} households
  * @property {Object<string, number>=} stockpiles
+ * @property {string=} primaryLeaderId
+ * @property {SnapshotLeader[]=} leaders
+ * @property {Object<string, number>=} leaderDirectives
+ */
+
+/**
+ * @typedef {Object} SnapshotLeader
+ * @property {string} agentId
+ * @property {string=} role
+ * @property {string=} title
+ * @property {string=} method
+ * @property {number=} score
+ * @property {number=} support
+ * @property {number=} selectedAtTick
+ * @property {Object<string, number>=} temperament
+ * @property {string[]=} traitFlags
+ * @property {string=} notes
  */
 
 /**
@@ -36,6 +56,8 @@
  * @property {SnapshotAgent[]} agents - Agents reported for this tick.
  * @property {SnapshotHouse[]} houses - Household aggregates (may be empty).
  * @property {SnapshotCity|null} city - Urban aggregate (optional).
+ * @property {{houses?: Object<string, SnapshotLeader[]>, city?: SnapshotLeader[], updatedAtTick?: number}=} leadership -
+ *   Leadership overlays for quick HUD display.
  */
 
 export {};

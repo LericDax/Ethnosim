@@ -68,6 +68,7 @@ export class HUD {
     this._latestAgentsById = new Map();
     this._latestHousesById = new Map();
     this._latestCity = null;
+    this._latestLeadership = null;
     this._currentSelection = { type: null, id: null, data: null };
     this.teleportButton = null;
     this.teleportHintEl = null;
@@ -87,6 +88,9 @@ export class HUD {
     this.populationEl.textContent = 'Population: –';
     this.statsEl.appendChild(this.tickValueEl);
     this.statsEl.appendChild(this.populationEl);
+    this.leadershipEl = document.createElement('div');
+    this.leadershipEl.textContent = 'Leadership: –';
+    this.statsEl.appendChild(this.leadershipEl);
     this.root.appendChild(this.statsEl);
 
     this.controlsEl = document.createElement('div');
@@ -155,9 +159,11 @@ export class HUD {
     }
 
     this._latestCity = snapshot.city ?? null;
+    this._latestLeadership = snapshot.leadership ?? null;
 
     this._refreshAgentOptions(snapshot.agents ?? []);
     this._updateInspectorSelection();
+    this._updateLeadershipSummary(snapshot);
   }
 
   _applyHostStyles() {
@@ -188,6 +194,42 @@ export class HUD {
       this.host.style.flexDirection = 'column';
       this.host.style.alignItems = 'stretch';
     }
+  }
+
+  _updateLeadershipSummary(snapshot) {
+    if (!this.leadershipEl) {
+      return;
+    }
+    const leadership = snapshot?.leadership ?? this._latestLeadership;
+    const city = snapshot?.city ?? this._latestCity;
+    const cityLeaders = Array.isArray(leadership?.city)
+      ? leadership.city
+      : Array.isArray(city?.leaders)
+        ? city.leaders
+        : [];
+    const primaryCityId = city?.primaryLeaderId ?? (cityLeaders[0]?.agentId ?? null);
+    const primaryCityLeader = cityLeaders.find((leader) => leader?.agentId === primaryCityId) ?? cityLeaders[0] ?? null;
+    const cityLabel = primaryCityLeader
+      ? `${primaryCityLeader.title ?? primaryCityLeader.role ?? 'Leader'} ${primaryCityLeader.agentId}`
+      : 'None';
+    const houseEntries = leadership?.houses ?? {};
+    const totalHouses = Array.isArray(snapshot?.houses)
+      ? snapshot.houses.length
+      : Object.keys(houseEntries).length;
+    let activeHouseLeaders = 0;
+    for (const leaders of Object.values(houseEntries)) {
+      if (Array.isArray(leaders) && leaders.length > 0) {
+        activeHouseLeaders += 1;
+      }
+    }
+    const stewardDetails = primaryCityLeader
+      ? `${cityLabel} (${primaryCityLeader.method ?? 'temperament'}, score ${
+          Number.isFinite(primaryCityLeader.score)
+            ? Number(primaryCityLeader.score).toFixed(2)
+            : '–'
+        })`
+      : cityLabel;
+    this.leadershipEl.textContent = `City steward: ${stewardDetails} • Houses with leaders: ${activeHouseLeaders}/${totalHouses}`;
   }
 
   _applyRootStyles() {

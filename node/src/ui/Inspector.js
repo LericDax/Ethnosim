@@ -131,6 +131,16 @@ function formatBuildProgressDisplay(construction) {
   return `${Math.round(ratio * 100)}% (${progress.toFixed(1)} / ${required.toFixed(1)})`;
 }
 
+function formatDirectiveMapDisplay(directives) {
+  if (!directives || typeof directives !== 'object') {
+    return '–';
+  }
+  const entries = Object.entries(directives)
+    .filter(([, value]) => Number.isFinite(value))
+    .map(([key, value]) => `${key}: ${Number(value).toFixed(2)}`);
+  return entries.length > 0 ? entries.join(', ') : '–';
+}
+
 export class Inspector {
   constructor({ container = document.body, onRequestClose = null } = {}) {
     this.container = container;
@@ -472,6 +482,45 @@ export class Inspector {
     return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
   }
 
+  _formatPrimaryLeader(leaders, primaryId) {
+    if (!Array.isArray(leaders) || leaders.length === 0) {
+      return '–';
+    }
+    const primary = leaders.find((leader) => leader?.agentId === primaryId) ?? leaders[0];
+    if (!primary) {
+      return '–';
+    }
+    const roleLabel = primary.title ?? primary.role ?? 'Leader';
+    const method = typeof primary.method === 'string' ? primary.method : 'temperament';
+    const score = Number.isFinite(primary.score) ? Number(primary.score).toFixed(2) : '–';
+    const support = Number.isFinite(primary.support) ? Number(primary.support).toFixed(2) : '–';
+    return `${roleLabel}: ${primary.agentId} (${method}, score ${score}, support ${support})`;
+  }
+
+  _formatLeaderRoster(leaders) {
+    if (!Array.isArray(leaders) || leaders.length === 0) {
+      return '–';
+    }
+    const entries = leaders.map((leader) => this._formatLeaderEntry(leader));
+    return entries.filter(Boolean).join(' • ') || '–';
+  }
+
+  _formatLeaderEntry(leader) {
+    if (!leader || typeof leader !== 'object') {
+      return null;
+    }
+    const roleLabel = leader.title ?? leader.role ?? 'Leader';
+    const method = typeof leader.method === 'string' ? leader.method : 'temperament';
+    const support = Number.isFinite(leader.support) ? Number(leader.support).toFixed(2) : '–';
+    const score = Number.isFinite(leader.score) ? Number(leader.score).toFixed(2) : '–';
+    const notes = typeof leader.notes === 'string' && leader.notes.length > 0 ? ` – ${leader.notes}` : '';
+    return `${roleLabel}: ${leader.agentId} (${method}, score ${score}, support ${support})${notes}`;
+  }
+
+  _formatLeaderDirectives(directives) {
+    return formatDirectiveMapDisplay(directives);
+  }
+
   _renderHouse(house) {
     const brainData = house?.brain ?? null;
     const brainSummary = brainData?.summary ?? null;
@@ -494,6 +543,8 @@ export class Inspector {
       'Current node': fallbackNodeId ?? '–',
       'Member count': members.length,
       Members: members,
+      'Primary leader': this._formatPrimaryLeader(house?.leaders, house?.primaryLeaderId),
+      'Leadership council': this._formatLeaderRoster(house?.leaders),
     };
     this._updateInfoSection(this.identitySection, identityData);
 
@@ -512,6 +563,7 @@ export class Inspector {
         typeof house?.construction?.cooldownUntil === 'number'
           ? Math.max(0, Math.round(house.construction.cooldownUntil))
           : '–',
+      'Leader directives': this._formatLeaderDirectives(house?.leaderDirectives),
     };
     this._updateInfoSection(this.statusSection, statusData);
 
@@ -538,6 +590,8 @@ export class Inspector {
       'City ID': city?.id ?? '–',
       Brain: brainSummary?.brainId ?? fallbackBrainId ?? '–',
       'Current node': fallbackNodeId ?? '–',
+      'Primary steward': this._formatPrimaryLeader(city?.leaders, city?.primaryLeaderId),
+      'Civic council': this._formatLeaderRoster(city?.leaders),
     };
     this._updateInfoSection(this.identitySection, identityData);
 
@@ -547,6 +601,7 @@ export class Inspector {
       'Demand expires at':
         typeof city?.demandExpiresAt === 'number' ? Math.max(0, Math.round(city.demandExpiresAt)) : '–',
       'Wood stockpile': formatResourceBundleDisplay(city?.stockpiles),
+      'Leader directives': this._formatLeaderDirectives(city?.leaderDirectives),
     };
     this._updateInfoSection(this.statusSection, statusData);
 
