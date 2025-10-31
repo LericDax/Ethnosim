@@ -200,7 +200,7 @@ export class MapView {
     if (this.cityVisible) {
       const city = this.findCityAtPoint(worldX, worldY);
       if (city) {
-        this.setSelectedCity(city.id ?? null);
+        this.setSelectedCity(city.id);
         return;
       }
     }
@@ -393,7 +393,12 @@ export class MapView {
     }
   }
 
-  setSelectedCity(cityId: string | null) {
+  setSelectedCity(cityId?: string | null) {
+    if (cityId === null) {
+      this.setSelectedEntity(null, null);
+      return;
+    }
+
     const id = cityId ?? this.latestCity?.id ?? null;
     if (id) {
       this.setSelectedEntity('city', id);
