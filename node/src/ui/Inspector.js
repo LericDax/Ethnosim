@@ -95,6 +95,9 @@ export class Inspector {
   constructor({ container = document.body } = {}) {
     this.container = container;
     this.agent = null;
+    this.house = null;
+    this.city = null;
+    this.selection = { type: null, data: null };
     this._moodBars = new Map();
     this._temperamentBars = new Map();
 
@@ -151,45 +154,111 @@ export class Inspector {
     this.bodyEl.appendChild(this.moodSection.root);
     this.bodyEl.appendChild(this.temperamentSection.root);
 
-    this.setAgent(null);
+    this.setSelection(null);
 
     this.container.appendChild(this.root);
   }
 
   setAgent(agent) {
-    this.agent = agent ?? null;
+    if (!agent) {
+      this.setSelection(null);
+      return;
+    }
+    this.setSelection({ type: 'agent', id: agent.id ?? null, data: agent });
+  }
 
-    if (!this.agent) {
+  setSelection(selection) {
+    const type = selection?.type ?? null;
+    const data = selection?.data ?? null;
+
+    this.selection = { type, data };
+    this.agent = type === 'agent' ? data ?? null : null;
+    this.house = type === 'house' ? data ?? null : null;
+    this.city = type === 'city' ? data ?? null : null;
+
+    if (!type || !data) {
       this.placeholderEl.style.display = 'block';
       this.bodyEl.style.display = 'none';
       this.titleEl.textContent = 'Agent Inspector';
       this.brainViewer.setData(null);
+      if (typeof this.brainViewer.setLabel === 'function') {
+        this.brainViewer.setLabel(null);
+      }
       this.brainSection.root.style.display = 'none';
+      this._configureSectionsForType(null);
       return;
     }
 
     this.placeholderEl.style.display = 'none';
     this.bodyEl.style.display = 'flex';
-    this.titleEl.textContent = `Agent ${this.agent.id ?? ''}`.trim();
 
-    const brainSummary = this.agent.brain?.summary ?? null;
-    this._updateBrainSection(brainSummary);
+    if (type === 'agent') {
+      this.titleEl.textContent = `Agent ${data.id ?? ''}`.trim();
+      this._configureSectionsForType('agent');
+      this._renderAgent(data);
+    } else if (type === 'house') {
+      this.titleEl.textContent = data.id ? `Dwelling ${data.id}` : 'Dwelling';
+      this._configureSectionsForType('house');
+      this._renderHouse(data);
+    } else if (type === 'city') {
+      this.titleEl.textContent = data.id ? `City ${data.id}` : 'City';
+      this._configureSectionsForType('city');
+      this._renderCity(data);
+    }
+  }
+
+  _configureSectionsForType(type) {
+    const showIdentity = type === 'agent' || type === 'house' || type === 'city';
+    const showStatus = showIdentity;
+    const showMood = type === 'agent' || type === 'house' || type === 'city';
+    const showTemperament = type === 'agent';
+
+    this.identitySection.root.style.display = showIdentity ? 'flex' : 'none';
+    this.statusSection.root.style.display = showStatus ? 'flex' : 'none';
+    this.moodSection.root.style.display = showMood ? 'flex' : 'none';
+    this.temperamentSection.root.style.display = showTemperament ? 'flex' : 'none';
+
+    if (this.moodSection.header) {
+      this.moodSection.header.textContent = type === 'agent' ? 'Moods' : 'Active Demands';
+    }
+    if (this.temperamentSection.header) {
+      this.temperamentSection.header.textContent = 'Temperament';
+    }
+  }
+
+  _renderAgent(agent) {
+    const brainData = agent?.brain ?? null;
+    const brainSummary = brainData?.summary ?? null;
+    const fallbackBrainId =
+      brainSummary?.brainId ?? agent?.brain_name ?? agent?.brainId ?? agent?.brain?.state?.brainId ?? null;
+    const fallbackNodeId =
+      brainSummary?.nodeId ?? agent?.brainNode ?? agent?.current_node ?? agent?.brain?.state?.currentNodeId ?? null;
+    const fallbackDecision =
+      brainSummary?.decision ?? agent?.brainDecision ?? agent?.brain?.state?.lastDecision ?? null;
+
+    this._updateBrainSection(brainData, {
+      fallbackBrainId,
+      fallbackNodeId,
+      fallbackDecision,
+      label: brainSummary?.brainId ?? fallbackBrainId ?? 'AgentMind',
+    });
 
     const identityData = {
-      'Agent ID': this.agent.id ?? '–',
-      'Life stage': this.agent.lifeStage ?? this.agent.ageStage ?? '–',
-      'Body sex': this.agent.sexBody ?? this.agent.sex_body ?? '–',
-      'Gender identity': this.agent.genderIdentity ?? this.agent.gender_identity ?? '–',
-      Brain: brainSummary?.brainId ?? this.agent.brain_name ?? '–',
-      'Current node': brainSummary?.nodeId ?? this.agent.brainNode ?? this.agent.current_node ?? '–',
+      'Agent ID': agent?.id ?? '–',
+      'Life stage': agent?.lifeStage ?? agent?.ageStage ?? '–',
+      'Body sex': agent?.sexBody ?? agent?.sex_body ?? '–',
+      'Gender identity': agent?.genderIdentity ?? agent?.gender_identity ?? '–',
+      Brain: brainSummary?.brainId ?? agent?.brain_name ?? fallbackBrainId ?? '–',
+      'Current node':
+        brainSummary?.nodeId ?? agent?.brainNode ?? agent?.current_node ?? brainData?.state?.currentNodeId ?? '–',
     };
     this._updateInfoSection(this.identitySection, identityData);
 
     let pregnancyDisplay = 'Unknown';
-    if (typeof this.agent.pregnant === 'boolean') {
-      pregnancyDisplay = this.agent.pregnant ? 'Yes' : 'No';
-    } else if (this.agent.pregnancy && typeof this.agent.pregnancy === 'object') {
-      const ticksRemaining = Number(this.agent.pregnancy.timeRemaining);
+    if (typeof agent?.pregnant === 'boolean') {
+      pregnancyDisplay = agent.pregnant ? 'Yes' : 'No';
+    } else if (agent?.pregnancy && typeof agent.pregnancy === 'object') {
+      const ticksRemaining = Number(agent.pregnancy.timeRemaining);
       pregnancyDisplay = Number.isFinite(ticksRemaining)
         ? `Yes (${Math.max(0, Math.round(ticksRemaining))} ticks remaining)`
         : 'Yes';
@@ -198,35 +267,116 @@ export class Inspector {
     }
 
     const statusData = {
-      Dwelling: this.agent.houseId ?? this.agent.dwelling_id ?? '–',
+      Dwelling: agent?.houseId ?? agent?.dwelling_id ?? '–',
       Pregnancy: pregnancyDisplay,
-      'Bond partner': this.agent.bondPartnerId ?? this.agent.bond_partner_id ?? '–',
-      Parents: this.agent.parents ?? this.agent.parent_ids ?? [],
-      Fertility: typeof this.agent.fertility === 'number' ? this.agent.fertility.toFixed(2) : '–',
+      'Bond partner': agent?.bondPartnerId ?? agent?.bond_partner_id ?? '–',
+      Parents: agent?.parents ?? agent?.parent_ids ?? [],
+      Fertility: typeof agent?.fertility === 'number' ? agent.fertility.toFixed(2) : '–',
     };
     this._updateInfoSection(this.statusSection, statusData);
 
-    this._updateBarSection(this.moodSection, this.agent.moods);
-    this._updateBarSection(this.temperamentSection, this.agent.temperament, this.agent.pregnancy?.fetusTemperament);
+    this._updateBarSection(this.moodSection, agent?.moods);
+    this._updateBarSection(
+      this.temperamentSection,
+      agent?.temperament,
+      agent?.pregnancy?.fetusTemperament,
+    );
   }
 
-  _updateBrainSection(brainSummary) {
-    const brainId =
-      brainSummary?.brainId ??
-      this.agent?.brain_name ??
-      this.agent?.brainId ??
-      this.agent?.brain?.state?.brainId ??
-      null;
+  _renderHouse(house) {
+    const brainData = house?.brain ?? null;
+    const brainSummary = brainData?.summary ?? null;
+    const fallbackBrainId = brainSummary?.brainId ?? 'HouseMind_v1';
+    const fallbackNodeId = brainSummary?.nodeId ?? brainData?.state?.currentNodeId ?? null;
+    const fallbackDecision = brainSummary?.decision ?? brainData?.state?.lastDecision ?? null;
+
+    this._updateBrainSection(brainData, {
+      fallbackBrainId,
+      fallbackNodeId,
+      fallbackDecision,
+      label: brainSummary?.brainId ?? 'HouseMind',
+    });
+
+    const members = Array.isArray(house?.members) ? house.members : [];
+    const identityData = {
+      'Entity type': 'Dwelling',
+      'Dwelling ID': house?.id ?? '–',
+      Brain: brainSummary?.brainId ?? fallbackBrainId ?? '–',
+      'Current node': fallbackNodeId ?? '–',
+      'Member count': members.length,
+      Members: members,
+    };
+    this._updateInfoSection(this.identitySection, identityData);
+
+    const statusData = {
+      Radius: typeof house?.radius === 'number' ? house.radius.toFixed(1) : '–',
+      Authority: typeof house?.authority === 'number' ? house.authority.toFixed(2) : '–',
+    };
+    this._updateInfoSection(this.statusSection, statusData);
+
+    this._updateBarSection(this.moodSection, house?.demand);
+    this._updateBarSection(this.temperamentSection, null);
+  }
+
+  _renderCity(city) {
+    const brainData = city?.brain ?? null;
+    const brainSummary = brainData?.summary ?? null;
+    const fallbackBrainId = brainSummary?.brainId ?? 'UrbanMind_v1';
+    const fallbackNodeId = brainSummary?.nodeId ?? brainData?.state?.currentNodeId ?? null;
+    const fallbackDecision = brainSummary?.decision ?? brainData?.state?.lastDecision ?? null;
+
+    this._updateBrainSection(brainData, {
+      fallbackBrainId,
+      fallbackNodeId,
+      fallbackDecision,
+      label: brainSummary?.brainId ?? 'UrbanMind',
+    });
+
+    const identityData = {
+      'Entity type': 'City',
+      'City ID': city?.id ?? '–',
+      Brain: brainSummary?.brainId ?? fallbackBrainId ?? '–',
+      'Current node': fallbackNodeId ?? '–',
+    };
+    this._updateInfoSection(this.identitySection, identityData);
+
+    const statusData = {
+      Radius: typeof city?.radius === 'number' ? city.radius.toFixed(1) : '–',
+      Authority: typeof city?.authority === 'number' ? city.authority.toFixed(2) : '–',
+      'Demand expires at':
+        typeof city?.demandExpiresAt === 'number' ? Math.max(0, Math.round(city.demandExpiresAt)) : '–',
+    };
+    this._updateInfoSection(this.statusSection, statusData);
+
+    this._updateBarSection(this.moodSection, city?.demand);
+    this._updateBarSection(this.temperamentSection, null);
+  }
+
+  _updateBrainSection(brainData, options = {}) {
+    const summary = brainData?.summary ?? null;
+    const state = brainData?.state ?? null;
+    const fallbackBrainId = options.fallbackBrainId ?? null;
+    const brainId = summary?.brainId ?? state?.brainId ?? fallbackBrainId ?? null;
     const graph = getBrainGraph(brainId);
     if (!graph) {
       this.brainViewer.setData(null);
+      if (typeof this.brainViewer.setLabel === 'function') {
+        this.brainViewer.setLabel(options.label ?? null);
+      }
       this.brainSection.root.style.display = 'none';
       return;
     }
 
     const currentNodeId =
-      brainSummary?.nodeId ?? this.agent?.brainNode ?? this.agent?.current_node ?? this.agent?.brain?.state?.currentNodeId ?? null;
-    const decision = brainSummary?.decision ?? this.agent?.brainDecision ?? this.agent?.brain?.state?.lastDecision ?? null;
+      summary?.nodeId ??
+      state?.currentNodeId ??
+      options.fallbackNodeId ??
+      null;
+    const decision = summary?.decision ?? state?.lastDecision ?? options.fallbackDecision ?? null;
+
+    if (typeof this.brainViewer.setLabel === 'function') {
+      this.brainViewer.setLabel(options.label ?? brainId ?? null);
+    }
 
     this.brainViewer.setData({
       nodes: graph.nodes.map((node) => ({ ...node })),
@@ -307,7 +457,7 @@ export class Inspector {
     const content = document.createElement('div');
     root.appendChild(content);
 
-    return { root, content };
+    return { root, content, header };
   }
 
   _updateInfoSection(section, data) {

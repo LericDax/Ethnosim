@@ -69,6 +69,24 @@ export class BrainViewer {
     this.scanlines = createScanlineOverlay();
     this.root.appendChild(this.scanlines);
 
+    this.labelEl = document.createElement('div');
+    Object.assign(this.labelEl.style, {
+      position: 'absolute',
+      top: '8px',
+      left: '12px',
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: '12px',
+      letterSpacing: '0.12em',
+      textTransform: 'uppercase',
+      color: 'rgba(226, 232, 240, 0.9)',
+      pointerEvents: 'none',
+      textShadow: '0 1px 2px rgba(2, 6, 23, 0.85)',
+      opacity: '0.92',
+      transition: 'opacity 160ms ease',
+      display: 'none',
+    });
+    this.root.appendChild(this.labelEl);
+
     this.emptyState = document.createElement('div');
     this.emptyState.textContent = 'No brain state available.';
     Object.assign(this.emptyState.style, {
@@ -143,6 +161,9 @@ export class BrainViewer {
     this._dataSignature = signature;
     this._data = data && Array.isArray(data.nodes) && data.nodes.length > 0 ? data : null;
     this.emptyState.style.display = this._data ? 'none' : 'flex';
+    if (!this._data) {
+      this.setLabel(null);
+    }
 
     if (!this._data) {
       this._orderedNodes = [];
@@ -190,6 +211,13 @@ export class BrainViewer {
     }
 
     this._startAnimation();
+  }
+
+  setLabel(label) {
+    const text = label ? String(label) : '';
+    this.labelEl.textContent = text;
+    this.labelEl.style.display = text ? 'block' : 'none';
+    this.labelEl.style.opacity = text ? '0.92' : '0';
   }
 
   _updateDecisionState(decision, forcePulse = false) {

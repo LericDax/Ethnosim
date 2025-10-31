@@ -51,6 +51,9 @@ export class HUD {
     this.inspector = new Inspector({ container: this.host });
 
     this._latestAgentsById = new Map();
+    this._latestHousesById = new Map();
+    this._latestCity = null;
+    this._currentSelection = { type: null, id: null, data: null };
 
     this.headerEl = document.createElement('div');
     this.headerEl.textContent = 'Simulation HUD';
@@ -80,11 +83,21 @@ export class HUD {
     this._buildTicksPerUpdateControl();
     this._buildAgentSelect();
     this._buildHeatmapControls();
+    this._buildCollectiveControls();
 
-    if (typeof this.scene.onSelectedAgentChange === 'function') {
-      this._handleSceneSelectionChange = this._handleSceneSelectionChange.bind(this);
-      this._detachSceneSelectionListener = this.scene.onSelectedAgentChange(
+    this._handleSceneSelectionChange = this._handleSceneSelectionChange.bind(this);
+    if (typeof this.scene.onSelectionChange === 'function') {
+      this._detachSceneSelectionListener = this.scene.onSelectionChange(
         this._handleSceneSelectionChange,
+      );
+    } else if (typeof this.scene.onSelectedAgentChange === 'function') {
+      this._detachSceneSelectionListener = this.scene.onSelectedAgentChange(
+        (agentId, agent) => {
+          const selection = agentId
+            ? { type: 'agent', id: agentId, data: agent ?? null }
+            : { type: null, id: null, data: null };
+          this._handleSceneSelectionChange(selection);
+        },
       );
     }
   }
@@ -106,6 +119,15 @@ export class HUD {
         this._latestAgentsById.set(agent.id, agent);
       }
     }
+
+    this._latestHousesById = new Map();
+    for (const house of snapshot.houses ?? []) {
+      if (house?.id) {
+        this._latestHousesById.set(house.id, house);
+      }
+    }
+
+    this._latestCity = snapshot.city ?? null;
 
     this._refreshAgentOptions(snapshot.agents ?? []);
     this._updateInspectorSelection();
@@ -266,6 +288,31 @@ export class HUD {
     this.controlsEl.appendChild(wrapper);
   }
 
+  _buildCollectiveControls() {
+    if (typeof this.scene.setCollectiveLayerEnabled !== 'function') {
+      return;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.style.display = 'flex';
+    wrapper.style.flexDirection = 'column';
+    wrapper.style.gap = '4px';
+    wrapper.style.marginTop = '4px';
+
+    const label = document.createElement('span');
+    label.textContent = 'Collective markers';
+    label.style.fontWeight = '500';
+    wrapper.appendChild(label);
+
+    const dwellingsToggle = this._createCollectiveToggle('Dwellings', 'dwellings');
+    const cityToggle = this._createCollectiveToggle('City', 'city');
+
+    wrapper.appendChild(dwellingsToggle);
+    wrapper.appendChild(cityToggle);
+
+    this.controlsEl.appendChild(wrapper);
+  }
+
   _createHeatmapToggle(labelText, layerId) {
     const row = document.createElement('label');
     row.style.display = 'flex';
@@ -281,6 +328,32 @@ export class HUD {
     checkbox.addEventListener('change', () => {
       if (typeof this.scene.setHeatmapLayerEnabled === 'function') {
         this.scene.setHeatmapLayerEnabled(layerId, checkbox.checked);
+      }
+    });
+
+    const span = document.createElement('span');
+    span.textContent = labelText;
+
+    row.appendChild(checkbox);
+    row.appendChild(span);
+    return row;
+  }
+
+  _createCollectiveToggle(labelText, layerId) {
+    const row = document.createElement('label');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '6px';
+    row.style.cursor = 'pointer';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = typeof this.scene.isCollectiveLayerEnabled === 'function'
+      ? this.scene.isCollectiveLayerEnabled(layerId)
+      : true;
+    checkbox.addEventListener('change', () => {
+      if (typeof this.scene.setCollectiveLayerEnabled === 'function') {
+        this.scene.setCollectiveLayerEnabled(layerId, checkbox.checked);
       }
     });
 
@@ -349,17 +422,26 @@ export class HUD {
     }
   }
 
-  _handleSceneSelectionChange(agentId, agent) {
+  _handleSceneSelectionChange(selection) {
+    const normalized = this._normalizeSelection(selection);
+    this._currentSelection = normalized;
+
     if (this.agentSelect) {
-      if (!agentId || this._agentOptionIds.has(agentId)) {
-        const nextValue = agentId ?? '';
+      if (
+        normalized.type === 'agent' &&
+        normalized.id &&
+        this._agentOptionIds.has(normalized.id)
+      ) {
+        const nextValue = normalized.id;
         if (this.agentSelect.value !== nextValue) {
           this.agentSelect.value = nextValue;
         }
+      } else if (this.agentSelect.value !== '') {
+        this.agentSelect.value = '';
       }
     }
 
-    this._updateInspectorSelection(agentId, agent);
+    this._updateInspectorSelection(normalized);
   }
 
   _styleButton(button) {
@@ -396,23 +478,72 @@ export class HUD {
     select.style.cursor = 'pointer';
   }
 
-  _updateInspectorSelection(agentIdOverride, agentOverride) {
+  _normalizeSelection(selection) {
+    if (selection && typeof selection === 'object' && 'type' in selection) {
+      const type = selection.type ?? null;
+      const data = selection.data ?? null;
+      let id = selection.id ?? null;
+      if (!id && type === 'city' && data && data.id) {
+        id = data.id;
+      }
+      return { type, id, data };
+    }
+    if (typeof selection === 'string') {
+      return { type: 'agent', id: selection, data: null };
+    }
+    return { type: null, id: null, data: null };
+  }
+
+  _resolveSelection(selection) {
+    const normalized = this._normalizeSelection(selection);
+    let { type, id } = normalized;
+    let { data } = normalized;
+
+    if (type === 'agent') {
+      if (id && !data && this._latestAgentsById) {
+        data = this._latestAgentsById.get(id) ?? null;
+      }
+    } else if (type === 'house') {
+      if (id && !data && this._latestHousesById) {
+        data = this._latestHousesById.get(id) ?? null;
+      }
+    } else if (type === 'city') {
+      const city = this._latestCity;
+      if (!data && city && (!id || city.id === id)) {
+        data = city;
+        id = city.id ?? id;
+      } else if (data && !id && data.id) {
+        id = data.id;
+      } else if (id && city && city.id === id && !data) {
+        data = city;
+      }
+    }
+
+    if (!type || !data) {
+      return { type: null, id: null, data: null };
+    }
+
+    return { type, id: id ?? null, data };
+  }
+
+  _updateInspectorSelection(selectionOverride) {
     if (!this.inspector) {
       return;
     }
 
-    const selectedId = agentIdOverride ?? this.scene?.selectedAgentId ?? null;
-    let agent = agentOverride ?? null;
+    const baseSelection =
+      selectionOverride !== undefined && selectionOverride !== null
+        ? selectionOverride
+        : this._currentSelection;
 
-    if (!agent && selectedId && this._latestAgentsById) {
-      agent = this._latestAgentsById.get(selectedId) ?? null;
-    }
+    const resolved = this._resolveSelection(baseSelection);
+    this._currentSelection = resolved;
 
-    if (!selectedId) {
-      this.inspector.setAgent(null);
+    if (!resolved.type) {
+      this.inspector.setSelection(null);
       return;
     }
 
-    this.inspector.setAgent(agent ?? null);
+    this.inspector.setSelection(resolved);
   }
 }

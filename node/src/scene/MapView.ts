@@ -1,4 +1,5 @@
 import { AgentLayer } from './AgentLayer.ts';
+import { CollectiveLayer } from './CollectiveLayer.ts';
 
 const TERRAIN_COLORS: Record<string, string> = {
   town: '#111821',
@@ -34,6 +35,7 @@ export interface SnapshotAgent {
   x: number;
   y: number;
   lifeStage: 'baby' | 'child' | 'teen' | 'adult';
+  brain?: SnapshotBrainData;
 }
 
 export interface Snapshot {
@@ -42,6 +44,51 @@ export interface Snapshot {
   world?: SnapshotWorld;
   stats?: Record<string, number>;
   agents?: SnapshotAgent[];
+  houses?: SnapshotHouse[];
+  city?: SnapshotCity | null;
+}
+
+export interface SnapshotHouse {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  members: string[];
+  authority: number;
+  brain: SnapshotBrainData;
+  demand: Record<string, number>;
+}
+
+export interface SnapshotCity {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  authority: number;
+  brain: SnapshotBrainData;
+  demand: Record<string, number>;
+  demandExpiresAt: number;
+}
+
+export interface SnapshotBrainData {
+  summary: {
+    brainId: string;
+    nodeId: string;
+    nodeTimer: number;
+    nodeDuration: number;
+    decision: unknown;
+  } | null;
+  state?: {
+    brainId?: string;
+    currentNodeId?: string;
+    lastDecision?: unknown;
+  } | null;
+}
+
+export interface MapSelection {
+  type: 'agent' | 'house' | 'city' | null;
+  id: string | null;
+  data: SnapshotAgent | SnapshotHouse | SnapshotCity | null;
 }
 
 export interface MapViewOptions {
@@ -110,11 +157,21 @@ export class MapView {
 
   public selectedAgentId: string | null = null;
 
+  private latestHouses: SnapshotHouse[] = [];
+
+  private latestCity: SnapshotCity | null = null;
+
+  private dwellingsVisible = true;
+
+  private cityVisible = true;
+
+  private selectedEntity: MapSelection = { type: null, id: null, data: null };
+
   private readonly agentLayer: AgentLayer;
 
-  private readonly selectionListeners = new Set<
-    (agentId: string | null, agent: SnapshotAgent | null) => void
-  >();
+  private readonly collectiveLayer: CollectiveLayer;
+
+  private readonly selectionListeners = new Set<(selection: MapSelection) => void>();
 
   private readonly handlePointerDown = (event: PointerEvent) => {
     if (event.button != null && event.button !== 0) {
@@ -132,12 +189,26 @@ export class MapView {
       return;
     }
 
-    const nearest = this.findNearestAgent(worldX, worldY, SELECT_RADIUS_TILES);
-    if (!nearest) {
-      return;
+    if (this.dwellingsVisible) {
+      const nearestDwelling = this.findNearestDwelling(worldX, worldY);
+      if (nearestDwelling) {
+        this.setSelectedHouse(nearestDwelling.id);
+        return;
+      }
     }
 
-    this.setSelectedAgent(nearest.id);
+    if (this.cityVisible) {
+      const city = this.findCityAtPoint(worldX, worldY);
+      if (city) {
+        this.setSelectedCity(city.id ?? null);
+        return;
+      }
+    }
+
+    const nearestAgent = this.findNearestAgent(worldX, worldY, SELECT_RADIUS_TILES);
+    if (nearestAgent) {
+      this.setSelectedAgent(nearestAgent.id);
+    }
   };
 
   constructor({ container }: MapViewOptions) {
@@ -175,6 +246,7 @@ export class MapView {
     this.container.appendChild(this.canvas);
 
     this.agentLayer = new AgentLayer({ container: this.container });
+    this.collectiveLayer = new CollectiveLayer({ container: this.container });
 
     this.canvas.addEventListener('pointerdown', this.handlePointerDown);
 
@@ -213,7 +285,7 @@ export class MapView {
     this.offsetX = Math.floor((displayWidth - mapPixelWidth) / 2);
     this.offsetY = Math.floor((displayHeight - mapPixelHeight) / 2);
 
-    this.agentLayer.updateViewport({
+    const viewport = {
       displayWidth,
       displayHeight,
       devicePixelRatio: this.devicePixelRatio,
@@ -222,7 +294,10 @@ export class MapView {
       offsetY: this.offsetY,
       worldWidth: this.worldWidth,
       worldHeight: this.worldHeight,
-    });
+    } as const;
+
+    this.agentLayer.updateViewport(viewport);
+    this.collectiveLayer.updateViewport(viewport);
 
     this.needsRedraw = true;
     this.requestDraw();
@@ -237,14 +312,15 @@ export class MapView {
     this.latestSnapshot = snapshot;
 
     this.agentLayer.updateAgents(snapshot.tick ?? null, snapshot.agents ?? []);
+    this.latestHouses = Array.isArray(snapshot.houses)
+      ? snapshot.houses.slice()
+      : [];
+    this.latestCity = snapshot.city ?? null;
+    this.collectiveLayer.updateEntities(this.latestHouses, this.latestCity);
 
-    if (this.selectedAgentId) {
-      const stillExists = (snapshot.agents ?? []).some(
-        (agent) => agent?.id === this.selectedAgentId,
-      );
-      if (!stillExists) {
-        this.setSelectedAgent(null);
-      }
+    const selectedType = this.selectedEntity.type;
+    if (selectedType) {
+      this.setSelectedEntity(selectedType, this.selectedEntity.id);
     }
 
     const worldWidth = this.extractDimension(snapshot.world?.width, snapshot.world?.w);
@@ -287,23 +363,113 @@ export class MapView {
 
   /** Forward compatibility with HUD agent selection controls. */
   setSelectedAgent(agentId: string | null) {
-    const nextId = agentId ?? null;
-    if (this.selectedAgentId === nextId) {
+    const id = agentId ?? null;
+    if (id) {
+      this.setSelectedEntity('agent', id);
+    } else {
+      this.setSelectedEntity(null, null);
+    }
+  }
+
+  setSelectedHouse(houseId: string | null) {
+    const id = houseId ?? null;
+    if (id) {
+      this.setSelectedEntity('house', id);
+    } else {
+      this.setSelectedEntity(null, null);
+    }
+  }
+
+  setSelectedCity(cityId: string | null) {
+    const id = cityId ?? this.latestCity?.id ?? null;
+    if (id) {
+      this.setSelectedEntity('city', id);
+    } else {
+      this.setSelectedEntity(null, null);
+    }
+  }
+
+  setSelectedEntity(type: MapSelection['type'], id: string | null) {
+    const normalizedType: MapSelection['type'] = type ?? null;
+    let normalizedId: string | null = id ?? null;
+    let data: MapSelection['data'] = null;
+
+    if (normalizedType === 'agent') {
+      data = this.lookupAgent(normalizedId);
+      if (data) {
+        normalizedId = data.id ?? normalizedId;
+      }
+    } else if (normalizedType === 'house') {
+      data = this.lookupHouse(normalizedId);
+      if (data) {
+        normalizedId = data.id ?? normalizedId;
+      }
+    } else if (normalizedType === 'city') {
+      const city = this.lookupCity(normalizedId);
+      if (city) {
+        data = city;
+        normalizedId = city.id ?? normalizedId;
+      }
+    }
+
+    if (!normalizedType || !data) {
+      const changed = this.selectedEntity.type !== null;
+      this.selectedEntity = { type: null, id: null, data: null };
+      this.selectedAgentId = null;
+      this.agentLayer.setSelectedAgent(null);
+      this.collectiveLayer.setSelection(this.selectedEntity);
+      this.agentLayer.render();
+      this.collectiveLayer.render();
+      if (changed) {
+        this.emitSelectionChange();
+      }
       return;
     }
 
-    this.selectedAgentId = nextId;
+    const previousType = this.selectedEntity.type;
+    const previousId = this.selectedEntity.id;
+    const previousData = this.selectedEntity.data;
+
+    this.selectedEntity = { type: normalizedType, id: normalizedId, data };
+    this.selectedAgentId = normalizedType === 'agent' ? normalizedId : null;
     this.agentLayer.setSelectedAgent(this.selectedAgentId);
+    this.collectiveLayer.setSelection(this.selectedEntity);
     this.agentLayer.render();
-    this.emitSelectionChange();
+    this.collectiveLayer.render();
+
+    const changed =
+      previousType !== normalizedType ||
+      previousId !== normalizedId ||
+      previousData !== data;
+    if (changed) {
+      this.emitSelectionChange();
+    }
+  }
+
+  getSelection(): MapSelection {
+    return { ...this.selectedEntity };
+  }
+
+  onSelectionChange(listener: (selection: MapSelection) => void) {
+    this.selectionListeners.add(listener);
+    return () => {
+      this.selectionListeners.delete(listener);
+    };
   }
 
   onSelectedAgentChange(
     listener: (agentId: string | null, agent: SnapshotAgent | null) => void,
   ) {
-    this.selectionListeners.add(listener);
+    const wrapped = (selection: MapSelection) => {
+      if (selection.type === 'agent') {
+        listener(selection.id, selection.data as SnapshotAgent | null);
+      } else {
+        listener(null, null);
+      }
+    };
+    this.selectionListeners.add(wrapped);
     return () => {
-      this.selectionListeners.delete(listener);
+      this.selectionListeners.delete(wrapped);
     };
   }
 
@@ -326,6 +492,32 @@ export class MapView {
 
   isHeatmapLayerEnabled(layer: HeatmapLayer) {
     return this.heatmapVisibility[layer] ?? false;
+  }
+
+  setCollectiveLayerEnabled(layer: 'dwellings' | 'city', enabled: boolean) {
+    const next = Boolean(enabled);
+    if (layer === 'dwellings') {
+      if (this.dwellingsVisible === next) return;
+      this.dwellingsVisible = next;
+      this.collectiveLayer.setVisibility('dwellings', next);
+    } else if (layer === 'city') {
+      if (this.cityVisible === next) return;
+      this.cityVisible = next;
+      this.collectiveLayer.setVisibility('city', next);
+    } else {
+      return;
+    }
+    this.collectiveLayer.render();
+  }
+
+  isCollectiveLayerEnabled(layer: 'dwellings' | 'city') {
+    if (layer === 'dwellings') {
+      return this.dwellingsVisible;
+    }
+    if (layer === 'city') {
+      return this.cityVisible;
+    }
+    return false;
   }
 
   private extractDimension(primary?: number, fallback?: number) {
@@ -366,6 +558,7 @@ export class MapView {
     this.ctx.restore();
 
     this.agentLayer.render();
+    this.collectiveLayer.render();
   }
 
   private drawTerrain() {
@@ -526,22 +719,86 @@ export class MapView {
   }
 
   private emitSelectionChange() {
-    const agent = this.selectedAgentId ? this.findAgentById(this.selectedAgentId) : null;
+    const selection = { ...this.selectedEntity };
     for (const listener of this.selectionListeners) {
-      listener(this.selectedAgentId, agent);
+      listener(selection);
     }
   }
 
-  private findAgentById(agentId: string | null) {
-    if (!agentId || !this.latestSnapshot?.agents) {
+  private lookupAgent(agentId: string | null) {
+    if (!agentId) {
       return null;
     }
-    for (const agent of this.latestSnapshot.agents) {
+    const agents = this.latestSnapshot?.agents ?? [];
+    for (const agent of agents) {
       if (agent?.id === agentId) {
         return agent;
       }
     }
     return null;
+  }
+
+  private lookupHouse(houseId: string | null) {
+    if (!houseId) {
+      return null;
+    }
+    for (const house of this.latestHouses) {
+      if (house?.id === houseId) {
+        return house;
+      }
+    }
+    return null;
+  }
+
+  private lookupCity(cityId: string | null) {
+    if (!this.latestCity) {
+      return null;
+    }
+    if (!cityId || this.latestCity.id === cityId) {
+      return this.latestCity;
+    }
+    return null;
+  }
+
+  private findNearestDwelling(x: number, y: number) {
+    if (!this.latestHouses.length) {
+      return null;
+    }
+
+    let closest: SnapshotHouse | null = null;
+    let closestDistanceSq = Number.POSITIVE_INFINITY;
+
+    for (const house of this.latestHouses) {
+      if (!house) continue;
+      const hx = Number.isFinite(house.x) ? Number(house.x) : 0;
+      const hy = Number.isFinite(house.y) ? Number(house.y) : 0;
+      const dx = hx - x;
+      const dy = hy - y;
+      const distanceSq = dx * dx + dy * dy;
+      const radius = Math.max(1.8, Math.sqrt(Math.max(1, house.radius ?? 1)));
+      if (distanceSq <= radius * radius && distanceSq < closestDistanceSq) {
+        closestDistanceSq = distanceSq;
+        closest = house;
+      }
+    }
+
+    return closest;
+  }
+
+  private findCityAtPoint(x: number, y: number) {
+    const city = this.latestCity;
+    if (!city) {
+      return null;
+    }
+
+    const cx = Number.isFinite(city.x) ? Number(city.x) : 0;
+    const cy = Number.isFinite(city.y) ? Number(city.y) : 0;
+    const dx = cx - x;
+    const dy = cy - y;
+    const distanceSq = dx * dx + dy * dy;
+    const radius = Math.max(2.4, Math.sqrt(Math.max(1, city.radius ?? 1)));
+
+    return distanceSq <= radius * radius ? city : null;
   }
 
   private findNearestAgent(x: number, y: number, maxDistanceTiles: number) {
