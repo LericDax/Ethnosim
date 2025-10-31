@@ -7,11 +7,317 @@ import {
 } from './brain.ts';
 import type { BrainMultiplierSet } from './brain.ts';
 import type { RngStream } from './rng.ts';
+import type { ScenarioHousingConfig, ScenarioHousingProfile } from '../../../../shared/types.ts';
 
 const HOUSE_MIND_ID = 'HouseMind_v1';
 const HOUSE_NODE_DURATION = 12;
 const CITY_MIND_ID = 'UrbanMind_v1';
 const CITY_RADIUS_FACTOR = 0.35;
+
+export type HousePreferredMode = 'ratio' | 'fixed' | 'none';
+
+export interface HouseCapacityRuleState {
+  radiusFactor: number;
+  base: number;
+  min: number;
+  max: number;
+  preferredRatio: number;
+  preferredMode: HousePreferredMode;
+  maxMembersOverride: number | null;
+  preferredMembersOverride: number | null;
+}
+
+export interface HouseCapacityController {
+  defaultArchetypeId: string;
+  defaults: HouseCapacityRuleState;
+  archetypes: Map<string, HouseCapacityRuleState>;
+}
+
+export interface SerializedHouseCapacityRule {
+  radiusFactor: number;
+  base: number;
+  min: number;
+  max: number;
+  preferredRatio: number;
+  preferredMode: HousePreferredMode;
+  maxMembersOverride: number | null;
+  preferredMembersOverride: number | null;
+}
+
+export interface SerializedHouseCapacityController {
+  defaultArchetypeId: string;
+  defaults: SerializedHouseCapacityRule;
+  archetypes: Record<string, SerializedHouseCapacityRule>;
+}
+
+export type HouseCapacityPatch = ScenarioHousingProfile;
+
+export const DEFAULT_HOUSE_ARCHETYPE_ID = 'default';
+
+const DEFAULT_CAPACITY_RULE: HouseCapacityRuleState = {
+  radiusFactor: 0.6,
+  base: 2,
+  min: 3,
+  max: 16,
+  preferredRatio: 0.85,
+  preferredMode: 'ratio',
+  maxMembersOverride: null,
+  preferredMembersOverride: null,
+};
+
+const MIN_RADIUS_FACTOR = 0.05;
+const MAX_RADIUS_FACTOR = 8;
+
+function cloneHouseCapacityRule(rule: HouseCapacityRuleState): HouseCapacityRuleState {
+  return { ...rule };
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  if (value < min) {
+    return min;
+  }
+  if (value > max) {
+    return max;
+  }
+  return value;
+}
+
+function sanitizeArchetypeId(id?: string | null): string {
+  if (!id) {
+    return '';
+  }
+  return String(id).trim();
+}
+
+function normalizeHouseCapacityRule(rule: HouseCapacityRuleState): HouseCapacityRuleState {
+  const radiusFactor = clampNumber(rule.radiusFactor, MIN_RADIUS_FACTOR, MAX_RADIUS_FACTOR);
+  const base = Number.isFinite(rule.base) ? rule.base : DEFAULT_CAPACITY_RULE.base;
+  const min = Math.max(1, Math.floor(Number.isFinite(rule.min) ? rule.min : DEFAULT_CAPACITY_RULE.min));
+  const rawMax = Math.floor(Number.isFinite(rule.max) ? rule.max : DEFAULT_CAPACITY_RULE.max);
+  const max = rawMax >= min ? rawMax : min;
+  const preferredRatio = clampNumber(rule.preferredRatio, 0, 1);
+  let preferredMode: HousePreferredMode = rule.preferredMode ?? 'ratio';
+
+  let maxOverride: number | null = null;
+  if (rule.maxMembersOverride !== null && Number.isFinite(rule.maxMembersOverride)) {
+    const sanitized = Math.floor(rule.maxMembersOverride);
+    maxOverride = Math.max(min, Math.min(max, sanitized));
+  }
+
+  let preferredOverride: number | null = null;
+  if (preferredMode === 'fixed') {
+    if (rule.preferredMembersOverride !== null && Number.isFinite(rule.preferredMembersOverride)) {
+      const sanitized = Math.floor(rule.preferredMembersOverride);
+      const ceiling = maxOverride ?? max;
+      preferredOverride = Math.max(1, Math.min(ceiling, sanitized));
+    } else {
+      // No explicit value, fall back to ratio semantics.
+      preferredMode = preferredRatio > 0 ? 'ratio' : 'none';
+    }
+  }
+
+  if (preferredMode === 'ratio' && preferredRatio <= 0) {
+    preferredMode = 'none';
+  }
+
+  if (preferredMode === 'none') {
+    preferredOverride = null;
+  }
+
+  return {
+    radiusFactor,
+    base,
+    min,
+    max,
+    preferredRatio,
+    preferredMode,
+    maxMembersOverride: maxOverride,
+    preferredMembersOverride: preferredMode === 'fixed' ? preferredOverride : null,
+  };
+}
+
+function applyHouseCapacityPatchInternal(
+  base: HouseCapacityRuleState,
+  patch?: HouseCapacityPatch | null,
+): HouseCapacityRuleState {
+  if (!patch) {
+    return cloneHouseCapacityRule(base);
+  }
+
+  const next: HouseCapacityRuleState = cloneHouseCapacityRule(base);
+
+  if (typeof patch.radius_density === 'number' && Number.isFinite(patch.radius_density) && patch.radius_density > 0) {
+    next.radiusFactor = patch.radius_density;
+  }
+  if (typeof patch.base === 'number' && Number.isFinite(patch.base)) {
+    next.base = patch.base;
+  }
+  if (typeof patch.min_members === 'number' && Number.isFinite(patch.min_members)) {
+    next.min = Math.max(1, Math.floor(patch.min_members));
+  }
+  if (typeof patch.max_members_cap === 'number' && Number.isFinite(patch.max_members_cap)) {
+    next.max = Math.max(next.min, Math.floor(patch.max_members_cap));
+  }
+  if (typeof patch.preferred_ratio === 'number' && Number.isFinite(patch.preferred_ratio)) {
+    const ratio = clampNumber(patch.preferred_ratio, 0, 1);
+    next.preferredRatio = ratio;
+    if (patch.preferred_members === undefined) {
+      next.preferredMode = ratio > 0 ? 'ratio' : 'none';
+    }
+  }
+
+  if (patch.max_members === null) {
+    next.maxMembersOverride = null;
+  } else if (typeof patch.max_members === 'number' && Number.isFinite(patch.max_members)) {
+    next.maxMembersOverride = Math.floor(patch.max_members);
+  }
+
+  if (patch.preferred_members === null) {
+    next.preferredMode = 'none';
+    next.preferredMembersOverride = null;
+  } else if (patch.preferred_members === 'ratio') {
+    next.preferredMode = 'ratio';
+    next.preferredMembersOverride = null;
+  } else if (typeof patch.preferred_members === 'number' && Number.isFinite(patch.preferred_members)) {
+    next.preferredMode = 'fixed';
+    next.preferredMembersOverride = Math.floor(patch.preferred_members);
+  }
+
+  return normalizeHouseCapacityRule(next);
+}
+
+function computeCapacityFromRule(
+  rule: HouseCapacityRuleState,
+  radius: number,
+): { maxMembers: number; preferredMembers: number | null } {
+  const radiusContribution = Math.round(Math.max(0, radius) * rule.radiusFactor + rule.base);
+  const capBase = Math.max(rule.min, Math.min(rule.max, radiusContribution));
+  const maxMembers = rule.maxMembersOverride !== null ? rule.maxMembersOverride : capBase;
+
+  let preferredMembers: number | null = null;
+  switch (rule.preferredMode) {
+    case 'fixed': {
+      const ceiling = Math.max(1, rule.maxMembersOverride ?? maxMembers);
+      const override = rule.preferredMembersOverride ?? ceiling;
+      preferredMembers = Math.max(1, Math.min(ceiling, override));
+      break;
+    }
+    case 'ratio': {
+      const ratio = clampNumber(rule.preferredRatio, 0, 1);
+      if (ratio > 0) {
+        preferredMembers = Math.max(1, Math.min(maxMembers, Math.round(maxMembers * ratio)));
+      } else {
+        preferredMembers = null;
+      }
+      break;
+    }
+    case 'none':
+    default:
+      preferredMembers = null;
+      break;
+  }
+
+  return { maxMembers, preferredMembers };
+}
+
+export function applyHouseCapacityPatch(
+  base: HouseCapacityRuleState,
+  patch?: HouseCapacityPatch | null,
+): HouseCapacityRuleState {
+  return applyHouseCapacityPatchInternal(base, patch);
+}
+
+export function createHouseCapacityController(
+  config?: ScenarioHousingConfig | null,
+): HouseCapacityController {
+  const controller: HouseCapacityController = {
+    defaultArchetypeId: DEFAULT_HOUSE_ARCHETYPE_ID,
+    defaults: normalizeHouseCapacityRule(cloneHouseCapacityRule(DEFAULT_CAPACITY_RULE)),
+    archetypes: new Map(),
+  };
+
+  if (config?.default) {
+    controller.defaults = applyHouseCapacityPatchInternal(controller.defaults, config.default);
+  }
+
+  const defaultArchetype = sanitizeArchetypeId(config?.default_archetype);
+  if (defaultArchetype) {
+    controller.defaultArchetypeId = defaultArchetype;
+  }
+
+  if (config?.archetypes) {
+    for (const [key, value] of Object.entries(config.archetypes)) {
+      const archetypeId = sanitizeArchetypeId(key) || DEFAULT_HOUSE_ARCHETYPE_ID;
+      const baseRule = archetypeId === controller.defaultArchetypeId ? controller.defaults : controller.defaults;
+      controller.archetypes.set(archetypeId, applyHouseCapacityPatchInternal(baseRule, value));
+    }
+  }
+
+  return controller;
+}
+
+export function cloneHouseCapacityController(
+  controller: HouseCapacityController,
+): HouseCapacityController {
+  const clone: HouseCapacityController = {
+    defaultArchetypeId: controller.defaultArchetypeId,
+    defaults: cloneHouseCapacityRule(controller.defaults),
+    archetypes: new Map(),
+  };
+  for (const [key, value] of controller.archetypes.entries()) {
+    clone.archetypes.set(key, cloneHouseCapacityRule(value));
+  }
+  return clone;
+}
+
+export function serializeHouseCapacityController(
+  controller: HouseCapacityController,
+): SerializedHouseCapacityController {
+  const archetypes: Record<string, SerializedHouseCapacityRule> = {};
+  for (const [key, value] of controller.archetypes.entries()) {
+    archetypes[key] = { ...value };
+  }
+  return {
+    defaultArchetypeId: controller.defaultArchetypeId,
+    defaults: { ...controller.defaults },
+    archetypes,
+  };
+}
+
+export function restoreHouseCapacityController(
+  serialized?: SerializedHouseCapacityController | null,
+  fallbackConfig?: ScenarioHousingConfig | null,
+): HouseCapacityController {
+  if (serialized) {
+    const controller: HouseCapacityController = {
+      defaultArchetypeId: sanitizeArchetypeId(serialized.defaultArchetypeId) || DEFAULT_HOUSE_ARCHETYPE_ID,
+      defaults: normalizeHouseCapacityRule(serialized.defaults),
+      archetypes: new Map(),
+    };
+    for (const [key, value] of Object.entries(serialized.archetypes ?? {})) {
+      const archetypeId = sanitizeArchetypeId(key) || DEFAULT_HOUSE_ARCHETYPE_ID;
+      controller.archetypes.set(archetypeId, normalizeHouseCapacityRule(value));
+    }
+    return controller;
+  }
+  return createHouseCapacityController(fallbackConfig ?? null);
+}
+
+export function resolveHouseCapacity(
+  controller: HouseCapacityController,
+  radius: number,
+  options: { archetypeId?: string | null; override?: HouseCapacityPatch | null } = {},
+): { maxMembers: number; preferredMembers: number | null } {
+  const archetypeId = sanitizeArchetypeId(options.archetypeId) || controller.defaultArchetypeId;
+  const baseRule = controller.archetypes.get(archetypeId) ?? controller.defaults;
+  const effectiveRule = options.override
+    ? applyHouseCapacityPatchInternal(baseRule, options.override)
+    : baseRule;
+  return computeCapacityFromRule(effectiveRule, radius);
+}
 
 export type ResourceType = 'wood';
 
@@ -131,6 +437,10 @@ export interface HouseState {
   x: number;
   y: number;
   radius: number;
+  maxMembers: number;
+  preferredMembers: number | null;
+  capacityPressure: number;
+  archetypeId: string | null;
   brain: BrainState;
   brainNodeDuration: number;
   brainDecision: BrainDecision | null;
@@ -141,6 +451,46 @@ export interface HouseState {
   primaryLeaderId: string | null;
   leaders: CollectiveLeaderDescriptor[];
   leaderDirectives: Record<string, number>;
+}
+
+export function ensureHouseCapacity(
+  controller: HouseCapacityController,
+  house: HouseState,
+  options: { override?: HouseCapacityPatch | null; archetypeId?: string | null } = {},
+): { maxMembers: number; preferredMembers: number | null } {
+  const archetypeId = sanitizeArchetypeId(options.archetypeId ?? house.archetypeId) ||
+    controller.defaultArchetypeId;
+  house.archetypeId = archetypeId;
+  const resolved = resolveHouseCapacity(controller, house.radius, {
+    archetypeId,
+    override: options.override ?? null,
+  });
+  house.maxMembers = resolved.maxMembers;
+  house.preferredMembers = resolved.preferredMembers;
+  const preferredTarget = house.preferredMembers ?? house.maxMembers;
+  house.capacityPressure = Math.max(0, house.members.length - preferredTarget);
+  return resolved;
+}
+
+export function setHouseCapacityDefaults(
+  controller: HouseCapacityController,
+  patch?: HouseCapacityPatch | null,
+): void {
+  controller.defaults = applyHouseCapacityPatchInternal(controller.defaults, patch);
+}
+
+export function setHouseCapacityForArchetype(
+  controller: HouseCapacityController,
+  archetypeId: string,
+  patch?: HouseCapacityPatch | null,
+): void {
+  const id = sanitizeArchetypeId(archetypeId) || controller.defaultArchetypeId;
+  if (!patch) {
+    controller.archetypes.delete(id);
+    return;
+  }
+  const baseRule = controller.archetypes.get(id) ?? controller.defaults;
+  controller.archetypes.set(id, applyHouseCapacityPatchInternal(baseRule, patch));
 }
 
 interface CityDemandTemplate {
@@ -225,6 +575,8 @@ interface HouseSpawnOptions {
   rng: RngStream;
   agents: HouseAssignableAgent[];
   desiredHouseCount?: number;
+  housing: HouseCapacityController;
+  defaultArchetypeId?: string | null;
 }
 
 interface CitySpawnOptions {
@@ -236,6 +588,12 @@ interface CitySpawnOptions {
 interface HouseAssignmentOptions {
   currentTick?: number;
   rng?: RngStream | null;
+}
+
+export interface HouseAssignmentResult {
+  overflowAgents: HouseAssignableAgent[];
+  fullHouseIds: string[];
+  allHousesFull: boolean;
 }
 
 const CITY_ELIGIBLE_STAGES: LifeStage[] = ['teen', 'adult'];
@@ -269,7 +627,7 @@ const DIRECTIVE_TAG_WEIGHTS: Record<string, number> = {
 const MAX_SECONDARY_LEADERS = 2;
 
 export function createInitialHouses(options: HouseSpawnOptions): HouseState[] {
-  const { width, height, rng, agents, desiredHouseCount } = options;
+  const { width, height, rng, agents, desiredHouseCount, housing, defaultArchetypeId } = options;
   const count = determineHouseCount(agents.length, desiredHouseCount);
   const houses: HouseState[] = [];
   const centerX = (width - 1) / 2;
@@ -282,21 +640,40 @@ export function createInitialHouses(options: HouseSpawnOptions): HouseState[] {
     const x = clamp(centerX + Math.cos(angle) * offsetRadius, 0, width);
     const y = clamp(centerY + Math.sin(angle) * offsetRadius, 0, height);
     const radius = maxRadius * (0.6 + rng.nextFloat() * 0.6);
-    houses.push(createHouseState(`house-${i}`, x, y, radius));
+    houses.push(
+      createHouseState(`house-${i}`, x, y, radius, {
+        housing,
+        archetypeId: defaultArchetypeId ?? housing.defaultArchetypeId,
+      }),
+    );
   }
 
-  assignAgentsToHouses(houses, agents, { currentTick: 0, rng });
   return houses;
 }
 
-export function createHouseState(id: string, x: number, y: number, radius: number): HouseState {
+export function createHouseState(
+  id: string,
+  x: number,
+  y: number,
+  radius: number,
+  options: { housing: HouseCapacityController; archetypeId?: string | null; override?: HouseCapacityPatch | null },
+): HouseState {
   const brain = createBrainState(HOUSE_MIND_ID);
+  const archetypeId = sanitizeArchetypeId(options.archetypeId) || options.housing.defaultArchetypeId;
+  const capacity = resolveHouseCapacity(options.housing, radius, {
+    archetypeId,
+    override: options.override ?? null,
+  });
 
   return {
     id,
     x,
     y,
     radius,
+    maxMembers: capacity.maxMembers,
+    preferredMembers: capacity.preferredMembers,
+    capacityPressure: 0,
+    archetypeId,
     brain,
     brainNodeDuration: HOUSE_NODE_DURATION,
     brainDecision: null,
@@ -352,29 +729,65 @@ export function assignAgentsToHouses(
   houses: HouseState[],
   agents: HouseAssignableAgent[],
   options: HouseAssignmentOptions = {},
-): void {
+): HouseAssignmentResult {
   if (houses.length === 0) {
-    return;
+    for (const agent of agents) {
+      agent.houseId = null;
+    }
+    return { overflowAgents: [...agents], fullHouseIds: [], allHousesFull: true };
   }
 
   const houseMap = new Map<string, HouseState>();
+  const remainingSlots = new Map<string, number>();
   for (const house of houses) {
     house.members = [];
+    house.capacityPressure = Math.max(0, house.capacityPressure);
     houseMap.set(house.id, house);
+    remainingSlots.set(house.id, Math.max(0, Math.floor(house.maxMembers)));
   }
 
   const agentMap = new Map<string, HouseAssignableAgent>();
+  const deferred: HouseAssignableAgent[] = [];
+  const overflowAgents: HouseAssignableAgent[] = [];
+
   for (const agent of agents) {
     agentMap.set(agent.id, agent);
-    let assignedHouse = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
-    if (!assignedHouse) {
-      assignedHouse = findNearestHouse(agent, houses);
-      agent.houseId = assignedHouse?.id ?? null;
-    }
-
+    const assignedHouse = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
     if (assignedHouse) {
-      assignedHouse.members.push(agent.id);
+      const slots = remainingSlots.get(assignedHouse.id) ?? 0;
+      if (slots > 0) {
+        assignedHouse.members.push(agent.id);
+        remainingSlots.set(assignedHouse.id, slots - 1);
+        continue;
+      }
     }
+    deferred.push(agent);
+  }
+
+  for (const agent of deferred) {
+    const target = findNearestHouseWithCapacity(agent, houses, remainingSlots);
+    if (target) {
+      const slots = remainingSlots.get(target.id) ?? 0;
+      target.members.push(agent.id);
+      remainingSlots.set(target.id, Math.max(0, slots - 1));
+      agent.houseId = target.id;
+    } else {
+      agent.houseId = null;
+      overflowAgents.push(agent);
+    }
+  }
+
+  const fullHouseIds: string[] = [];
+  let allHousesFull = true;
+  for (const house of houses) {
+    const slots = remainingSlots.get(house.id) ?? 0;
+    if (slots > 0) {
+      allHousesFull = false;
+    } else {
+      fullHouseIds.push(house.id);
+    }
+    const preferredTarget = house.preferredMembers ?? house.maxMembers;
+    house.capacityPressure = Math.max(0, house.members.length - preferredTarget);
   }
 
   const context: LeadershipSelectionContext = {
@@ -385,6 +798,8 @@ export function assignAgentsToHouses(
   for (const house of houses) {
     updateHouseLeadership(house, agentMap, context);
   }
+
+  return { overflowAgents, fullHouseIds, allHousesFull };
 }
 
 export function updateCollectiveDemands(
@@ -848,10 +1263,18 @@ function determineHouseCount(agentCount: number, desired?: number): number {
   return Math.max(1, Math.round(agentCount / 6));
 }
 
-function findNearestHouse(agent: HouseAssignableAgent, houses: HouseState[]): HouseState | null {
+function findNearestHouseWithCapacity(
+  agent: HouseAssignableAgent,
+  houses: HouseState[],
+  remainingSlots: Map<string, number>,
+): HouseState | null {
   let best: HouseState | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const house of houses) {
+    const slots = remainingSlots.get(house.id) ?? 0;
+    if (slots <= 0) {
+      continue;
+    }
     const dx = agent.homeX - house.x;
     const dy = agent.homeY - house.y;
     const distance = dx * dx + dy * dy;

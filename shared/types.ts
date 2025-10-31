@@ -88,6 +88,23 @@ export interface ScenarioConfig {
     houses: ScenarioHouseAuthority[];
     city: ScenarioCityAuthority | null;
   };
+  housing?: ScenarioHousingConfig;
+}
+
+export interface ScenarioHousingProfile {
+  radius_density?: number;
+  base?: number;
+  min_members?: number;
+  max_members_cap?: number;
+  preferred_ratio?: number;
+  max_members?: number | null;
+  preferred_members?: number | null | 'ratio';
+}
+
+export interface ScenarioHousingConfig {
+  default?: ScenarioHousingProfile;
+  archetypes?: Record<string, ScenarioHousingProfile>;
+  default_archetype?: string;
 }
 
 export interface SnapshotWorldSize {
@@ -118,6 +135,10 @@ export interface SnapshotHouse {
   brain_node: string | null;
   primary_leader_id?: string | null;
   leaders?: SnapshotLeader[];
+  max_members?: number;
+  preferred_members?: number | null;
+  capacity_pressure?: number;
+  archetype_id?: string | null;
 }
 
 export interface SnapshotCity {

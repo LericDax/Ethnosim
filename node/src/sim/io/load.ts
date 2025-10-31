@@ -8,6 +8,7 @@ import {
   type HouseState,
   type ResourceBundle,
   type ResourceType,
+  restoreHouseCapacityController,
 } from '../engine/collectives.ts';
 import { restoreSeededRng } from '../engine/rng.ts';
 import { cloneBrainDecision, restoreBrainState } from '../engine/brain.ts';
@@ -31,6 +32,7 @@ import {
   type SerializedLeadershipState,
 } from './save.ts';
 import { matchReproductivePartners } from '../engine/repro.ts';
+import { getScenarioById } from '../data/scenarios.ts';
 import type { ReproductiveGroup } from '../engine/repro.ts';
 import { createInitialMovementState } from '../engine/move.ts';
 
@@ -63,6 +65,16 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
   const agents = serialized.agents.map((agent) => restoreAgent(agent));
   const houses = serialized.houses.map((house) => restoreHouse(house));
   const city = serialized.city ? restoreCity(serialized.city) : null;
+  const scenarioConfig = getScenarioById(serialized.scenarioId);
+  const housing = restoreHouseCapacityController(
+    (serialized as Partial<SerializedSimulationState>).housing ?? null,
+    scenarioConfig.housing ?? null,
+  );
+  for (const house of houses) {
+    if (!house.archetypeId) {
+      house.archetypeId = housing.defaultArchetypeId;
+    }
+  }
   const registrySource = (serialized as Partial<SerializedSimulationState>).chromosomes;
   const chromosomeRegistry = registrySource
     ? cloneChromosomeRegistry(registrySource)
@@ -104,6 +116,10 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
     seed: serialized.seed,
     chromosomeRegistry,
     leadership,
+    housing,
+    pendingHouseAssignments: sanitizePendingAssignments(
+      serialized.pendingHouseAssignments ?? [],
+    ),
   };
 
   matchReproductivePartners(simulation);
@@ -137,6 +153,26 @@ function restoreWorld(serialized: SerializedWorldState): WorldState {
     forestResources,
     forestResourceCapacity: capacity,
   };
+}
+
+function sanitizePendingAssignments(source: unknown): string[] {
+  if (!Array.isArray(source)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const queue: string[] = [];
+  for (const entry of source) {
+    if (typeof entry !== 'string') {
+      continue;
+    }
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    queue.push(trimmed);
+  }
+  return queue;
 }
 
 function restoreAgent(serialized: SerializedAgentState): AgentState {
@@ -262,11 +298,27 @@ function inferNextHouseId(houses: HouseState[]): number {
 }
 
 function restoreHouse(serialized: SerializedHouseState): HouseState {
+  const maxMembers = Number.isFinite(serialized.maxMembers)
+    ? Math.max(1, Math.floor(serialized.maxMembers))
+    : 1;
+  let preferredMembers: number | null = null;
+  if (serialized.preferredMembers === null) {
+    preferredMembers = null;
+  } else if (Number.isFinite(serialized.preferredMembers)) {
+    preferredMembers = Math.max(1, Math.min(maxMembers, Math.floor(serialized.preferredMembers)));
+  }
+  const capacityPressure = Number.isFinite(serialized.capacityPressure)
+    ? Math.max(0, Math.floor(serialized.capacityPressure))
+    : 0;
   return {
     id: serialized.id,
     x: serialized.x,
     y: serialized.y,
     radius: serialized.radius,
+    maxMembers,
+    preferredMembers,
+    capacityPressure,
+    archetypeId: serialized.archetypeId ?? null,
     brain: restoreBrainState(serialized.brain),
     brainNodeDuration: serialized.brainNodeDuration,
     brainDecision: cloneBrainDecision(serialized.brainDecision),

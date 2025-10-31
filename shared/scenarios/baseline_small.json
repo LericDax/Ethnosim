@@ -21,5 +21,15 @@
       { "id": "H2", "authority": 0.5 }
     ],
     "city": { "id": "C1", "authority": 0.7 }
+  },
+  "housing": {
+    "default": {
+      "radius_density": 0.6,
+      "base": 2,
+      "min_members": 3,
+      "max_members_cap": 14,
+      "preferred_ratio": 0.85
+    },
+    "default_archetype": "default"
   }
 }

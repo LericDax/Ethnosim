@@ -37,12 +37,18 @@ import {
   HOUSE_CONSTRUCTION_COOLDOWN,
   HOUSE_CONSTRUCTION_RETRY_DELAY,
   cloneLeaderDescriptor,
+  createHouseCapacityController,
+  ensureHouseCapacity,
+  setHouseCapacityDefaults,
+  setHouseCapacityForArchetype,
   type HouseAssignableAgent,
   type HouseState,
   type CityState,
   type ResourceBundle,
   type ResourceType,
   type CollectiveLeaderDescriptor,
+  type HouseCapacityController,
+  type HouseCapacityPatch,
 } from './engine/collectives.ts';
 import {
   stepAging,
@@ -139,6 +145,8 @@ export interface SimulationState {
   seed: string;
   chromosomeRegistry: ChromosomeRegistry;
   leadership: LeadershipSummary;
+  housing: HouseCapacityController;
+  pendingHouseAssignments: string[];
 }
 
 export interface SimulationConfig {
@@ -295,6 +303,10 @@ interface SnapshotHouse {
   primaryLeaderId: string | null;
   leaders: SnapshotLeader[];
   leaderDirectives: Record<string, number>;
+  maxMembers: number;
+  preferredMembers: number | null;
+  capacityPressure: number;
+  archetypeId: string | null;
 }
 
 interface SnapshotCity {
@@ -396,6 +408,14 @@ interface WorkerTrackAgentMessage {
   id: string | null;
 }
 
+interface WorkerAdjustHousingCapacityMessage {
+  type: 'ADJUST_HOUSING_CAPACITY';
+  target: 'default' | 'archetype';
+  archetypeId?: string | null;
+  patch?: HouseCapacityPatch | null;
+  applyToExisting?: boolean;
+}
+
 type WorkerMessage =
   | WorkerInitMessage
   | WorkerStopMessage
@@ -404,7 +424,8 @@ type WorkerMessage =
   | WorkerSetTickIntervalMessage
   | WorkerSetTicksPerUpdateMessage
   | WorkerRequestSnapshotMessage
-  | WorkerTrackAgentMessage;
+  | WorkerTrackAgentMessage
+  | WorkerAdjustHousingCapacityMessage;
 
 interface WorkerContext {
   postMessage: (data: unknown) => void;
@@ -464,6 +485,9 @@ if (workerContext) {
         break;
       case 'TRACK_AGENT':
         trackAgent(message.id);
+        break;
+      case 'ADJUST_HOUSING_CAPACITY':
+        adjustHousingCapacity(message);
         break;
       default:
         break;
@@ -633,11 +657,14 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     scenarioConfig.population?.chromosomes ?? null,
   );
   const agents = createAgents(agentCount, width, height, agentStream, chromosomeRegistry);
+  const housing = createHouseCapacityController(scenarioConfig.housing ?? null);
   const houses = createInitialHouses({
     width,
     height,
     rng: collectivesStream,
     agents,
+    housing,
+    defaultArchetypeId: housing.defaultArchetypeId,
   });
   const city = createUrbanCenter({
     width,
@@ -672,7 +699,27 @@ export function createSimulationState(config: SimulationConfig): SimulationState
       city: city ? city.leaders.map((leader) => cloneLeaderDescriptor(leader)) : [],
       updatedAtTick: 0,
     },
+    housing,
+    pendingHouseAssignments: [],
   };
+
+  const initialAssignment = assignAgentsToHouses(simulation.houses, simulation.agents, {
+    currentTick: simulation.tick,
+    rng: simulation.rng.collectives,
+  });
+  const initialAgentMap = buildAgentMap(simulation.agents);
+  updateHousingQueue(simulation, initialAssignment.overflowAgents, initialAgentMap);
+  if (initialAssignment.allHousesFull && initialAssignment.overflowAgents.length > 0) {
+    for (const house of simulation.houses) {
+      if (!house.construction.active) {
+        house.construction.active = true;
+      }
+    }
+  }
+  updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
+    rng: simulation.rng.collectives,
+  });
+  updateLeadershipLedger(simulation);
 
   matchReproductivePartners(simulation);
 
@@ -870,10 +917,24 @@ export function stepSimulationState(simulation: SimulationState): void {
   matchReproductivePartners(simulation);
   handleReproduction(simulation);
 
-  assignAgentsToHouses(simulation.houses, simulation.agents, {
+  const assignment = assignAgentsToHouses(simulation.houses, simulation.agents, {
     currentTick: simulation.tick,
     rng: simulation.rng.collectives,
   });
+  const agentsById = buildAgentMap(simulation.agents);
+  updateHousingQueue(simulation, assignment.overflowAgents, agentsById);
+  for (const house of simulation.houses) {
+    if (house.capacityPressure > 0 && !house.construction.active) {
+      house.construction.active = true;
+    }
+  }
+  if (assignment.allHousesFull && assignment.overflowAgents.length > 0) {
+    for (const house of simulation.houses) {
+      if (!house.construction.active) {
+        house.construction.active = true;
+      }
+    }
+  }
   updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
     rng: simulation.rng.collectives,
   });
@@ -914,11 +975,6 @@ export function stepSimulationState(simulation: SimulationState): void {
     trackedAgentDecision = null;
     trackedAgentTransition = null;
   }
-
-  const agentsById = new Map<string, AgentState>();
-  simulation.agents.forEach((agent) => {
-    agentsById.set(agent.id, agent);
-  });
 
   const housesById = new Map<string, HouseState>();
   simulation.houses.forEach((house) => {
@@ -1111,6 +1167,123 @@ function recordAgentResourceActivity(
   }
 }
 
+function buildAgentMap(agents: AgentState[]): Map<string, AgentState> {
+  const map = new Map<string, AgentState>();
+  for (const agent of agents) {
+    map.set(agent.id, agent);
+  }
+  return map;
+}
+
+function updateHousingQueue(
+  simulation: SimulationState,
+  overflowAgents: HouseAssignableAgent[],
+  agentMap: Map<string, AgentState>,
+): void {
+  const seen = new Set<string>();
+  const nextQueue: string[] = [];
+
+  for (const id of simulation.pendingHouseAssignments) {
+    if (seen.has(id)) {
+      continue;
+    }
+    const agent = agentMap.get(id);
+    if (!agent || agent.houseId) {
+      continue;
+    }
+    seen.add(id);
+    nextQueue.push(id);
+  }
+
+  for (const overflow of overflowAgents) {
+    const agent = agentMap.get(overflow.id);
+    if (!agent || agent.houseId || seen.has(overflow.id)) {
+      continue;
+    }
+    agent.houseId = null;
+    seen.add(overflow.id);
+    nextQueue.push(overflow.id);
+  }
+
+  simulation.pendingHouseAssignments = nextQueue;
+}
+
+function settleAgentIntoHouse(
+  simulation: SimulationState,
+  agent: AgentState,
+  house: HouseState,
+): void {
+  agent.houseId = house.id;
+  const jitterAngle = simulation.rng.collectives.nextFloat() * Math.PI * 2;
+  const jitterRadius = house.radius * (0.2 + simulation.rng.collectives.nextFloat() * 0.4);
+  const targetX = house.x + Math.cos(jitterAngle) * jitterRadius;
+  const targetY = house.y + Math.sin(jitterAngle) * jitterRadius;
+  const clamped = clampPosition(simulation.world, targetX, targetY);
+  agent.homeX = clamped.x;
+  agent.homeY = clamped.y;
+  agent.x = clamped.x;
+  agent.y = clamped.y;
+}
+
+function normalizeArchetypeId(id: string | null | undefined, fallback: string): string {
+  if (!id) {
+    return fallback;
+  }
+  const trimmed = id.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function reconcileHousingAfterCapacityChange(simulation: SimulationState): void {
+  const assignment = assignAgentsToHouses(simulation.houses, simulation.agents, {
+    currentTick: simulation.tick,
+    rng: simulation.rng.collectives,
+  });
+  const agentMap = buildAgentMap(simulation.agents);
+  updateHousingQueue(simulation, assignment.overflowAgents, agentMap);
+  for (const house of simulation.houses) {
+    if (house.capacityPressure > 0 && !house.construction.active) {
+      house.construction.active = true;
+    }
+  }
+  updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
+    rng: simulation.rng.collectives,
+  });
+  updateLeadershipLedger(simulation);
+}
+
+function adjustHousingCapacity(message: WorkerAdjustHousingCapacityMessage): void {
+  if (!state) {
+    return;
+  }
+  if (message.target === 'default') {
+    setHouseCapacityDefaults(state.housing, message.patch ?? null);
+    if (message.applyToExisting !== false) {
+      for (const house of state.houses) {
+        ensureHouseCapacity(state.housing, house);
+      }
+      reconcileHousingAfterCapacityChange(state);
+    }
+    return;
+  }
+
+  const targetId = normalizeArchetypeId(message.archetypeId, state.housing.defaultArchetypeId);
+  if (message.patch) {
+    setHouseCapacityForArchetype(state.housing, targetId, message.patch);
+  } else {
+    state.housing.archetypes.delete(targetId);
+  }
+
+  if (message.applyToExisting !== false) {
+    for (const house of state.houses) {
+      const archetypeId = normalizeArchetypeId(house.archetypeId, state.housing.defaultArchetypeId);
+      if (archetypeId === targetId) {
+        ensureHouseCapacity(state.housing, house);
+      }
+    }
+    reconcileHousingAfterCapacityChange(state);
+  }
+}
+
 function maybeCompleteHouseConstruction(
   simulation: SimulationState,
   house: HouseState,
@@ -1199,7 +1372,10 @@ function spawnSatelliteHouse(
     }
 
     const id = `house-${simulation.nextHouseId}`;
-    const newHouse = createHouseState(id, clamped.x, clamped.y, radius);
+    const newHouse = createHouseState(id, clamped.x, clamped.y, radius, {
+      housing: simulation.housing,
+      archetypeId: parent.archetypeId ?? simulation.housing.defaultArchetypeId,
+    });
     simulation.nextHouseId += 1;
     return newHouse;
   }
@@ -1214,43 +1390,73 @@ function redistributeMembersToNewHouse(
   agentMap: Map<string, AgentState>,
 ): void {
   const parentMembers = parent.members.slice();
-  if (parentMembers.length === 0) {
-    child.members = [];
-    return;
+  const preferredParent = parent.preferredMembers ?? Math.max(1, Math.floor(parent.maxMembers * 0.8));
+  const targetParentCount = Math.max(1, Math.min(parentMembers.length, preferredParent));
+  const maxMovable = Math.max(0, parentMembers.length - targetParentCount);
+  const childCapacity = Math.max(0, child.maxMembers - child.members.length);
+  let moveCount = Math.min(maxMovable, childCapacity);
+  if (moveCount <= 0 && childCapacity > 0) {
+    moveCount = Math.min(childCapacity, Math.max(0, parentMembers.length - 1));
   }
 
-  const moveCount = Math.max(1, Math.floor(parentMembers.length * 0.25));
   const moved: string[] = [];
-
-  for (const memberId of parentMembers) {
-    if (moved.length >= moveCount) {
-      break;
+  if (moveCount > 0) {
+    for (const memberId of parentMembers) {
+      if (moved.length >= moveCount) {
+        break;
+      }
+      const agent = agentMap.get(memberId);
+      if (!agent) {
+        continue;
+      }
+      moved.push(memberId);
+      settleAgentIntoHouse(simulation, agent, child);
     }
-    const agent = agentMap.get(memberId);
-    if (!agent) {
-      continue;
+    if (moved.length > 0) {
+      const movedSet = new Set(moved);
+      parent.members = parent.members.filter((id) => !movedSet.has(id));
     }
-    moved.push(memberId);
-    agent.houseId = child.id;
-    const jitterAngle = simulation.rng.collectives.nextFloat() * Math.PI * 2;
-    const jitterRadius = child.radius * (0.2 + simulation.rng.collectives.nextFloat() * 0.4);
-    const targetX = child.x + Math.cos(jitterAngle) * jitterRadius;
-    const targetY = child.y + Math.sin(jitterAngle) * jitterRadius;
-    const clamped = clampPosition(simulation.world, targetX, targetY);
-    agent.homeX = clamped.x;
-    agent.homeY = clamped.y;
-    agent.x = clamped.x;
-    agent.y = clamped.y;
   }
 
-  if (moved.length === 0) {
-    child.members = [];
-    return;
-  }
-
-  const movedSet = new Set(moved);
-  parent.members = parent.members.filter((id) => !movedSet.has(id));
   child.members = moved;
+
+  if (child.members.length < child.maxMembers && simulation.pendingHouseAssignments.length > 0) {
+    const nextQueue: string[] = [];
+    for (const id of simulation.pendingHouseAssignments) {
+      if (child.members.length >= child.maxMembers) {
+        nextQueue.push(id);
+        continue;
+      }
+      const agent = agentMap.get(id);
+      if (!agent || agent.houseId) {
+        continue;
+      }
+      child.members.push(id);
+      settleAgentIntoHouse(simulation, agent, child);
+    }
+    simulation.pendingHouseAssignments = nextQueue;
+  } else if (simulation.pendingHouseAssignments.length > 0) {
+    simulation.pendingHouseAssignments = simulation.pendingHouseAssignments.filter((id) => {
+      const agent = agentMap.get(id);
+      return agent ? !agent.houseId : false;
+    });
+  }
+
+  if (child.members.length === 0) {
+    const availableFromParent = parent.members.filter((id) => agentMap.has(id));
+    if (availableFromParent.length > 1) {
+      const fallbackId = availableFromParent[0];
+      const agent = agentMap.get(fallbackId);
+      if (agent) {
+        parent.members = parent.members.filter((id) => id !== fallbackId);
+        child.members.push(fallbackId);
+        settleAgentIntoHouse(simulation, agent, child);
+      }
+    }
+  }
+
+  ensureHouseCapacity(simulation.housing, parent);
+  ensureHouseCapacity(simulation.housing, child);
 }
 
 function transferStarterResources(parent: HouseState, child: HouseState): void {
@@ -1492,6 +1698,10 @@ function createSnapshotHouse(house: HouseState, currentTick: number): SnapshotHo
     primaryLeaderId: house.primaryLeaderId,
     leaders: house.leaders.map((leader) => createSnapshotLeader(leader)),
     leaderDirectives: { ...house.leaderDirectives },
+    maxMembers: house.maxMembers,
+    preferredMembers: house.preferredMembers,
+    capacityPressure: house.capacityPressure,
+    archetypeId: house.archetypeId,
   };
 }
 
