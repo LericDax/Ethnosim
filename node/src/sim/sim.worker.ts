@@ -6,6 +6,7 @@ import {
   type BrainDecision,
   type BrainMultiplierSet,
   getCurrentNodeMetadata,
+  getNodeMetadata,
   serializeBrainState,
   cloneBrainDecision,
   type SerializedBrainState,
@@ -1354,7 +1355,13 @@ function extractSnapshotFillRatios(brain: BrainState): Record<string, number> {
     return {};
   }
   const entries = Array.from(brain.nodeCharge.entries())
-    .map(([nodeId, value]) => ({ nodeId, ratio: clamp01(value) }))
+    .map(([nodeId, charge]) => {
+      const metadata = getNodeMetadata(brain.brainId, nodeId);
+      const capacity = charge?.capacity ?? metadata.chargeCapacity;
+      const safeCapacity = capacity > 0 ? capacity : 1;
+      const ratio = clamp01((charge?.value ?? 0) / safeCapacity);
+      return { nodeId, ratio };
+    })
     .filter((entry) => entry.nodeId && entry.ratio > 0)
     .sort((a, b) => b.ratio - a.ratio);
 
