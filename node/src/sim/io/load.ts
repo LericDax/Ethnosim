@@ -10,7 +10,7 @@ import {
   type ResourceType,
   restoreHouseCapacityController,
 } from '../engine/collectives.ts';
-import { restoreSeededRng } from '../engine/rng.ts';
+import { restoreModeAwareRngSuite } from '../engine/rng.ts';
 import { cloneBrainDecision, restoreBrainState } from '../engine/brain.ts';
 import {
   cloneAgentChromosomes,
@@ -51,15 +51,13 @@ export async function loadSimulationState(id: string): Promise<SimulationState |
 }
 
 export function restoreSimulationState(serialized: SerializedSimulationState): SimulationState {
-  const rootRng = restoreSeededRng(serialized.rng.root);
-  const worldStream = rootRng.stream('world');
-  worldStream.restore(serialized.rng.streams.world);
-  const agentStream = rootRng.stream('agent-spawn');
-  agentStream.restore(serialized.rng.streams.agentSpawn);
-  const tickStream = rootRng.stream('tick');
-  tickStream.restore(serialized.rng.streams.tick);
-  const collectivesStream = rootRng.stream('collectives');
-  collectivesStream.restore(serialized.rng.streams.collectives);
+  const randomnessMode = serialized.randomnessMode ?? 'deterministic';
+  const rngSuite = restoreModeAwareRngSuite(randomnessMode, serialized.rng);
+  const rootRng = rngSuite.root;
+  const worldStream = rngSuite.world;
+  const agentStream = rngSuite.agentSpawn;
+  const tickStream = rngSuite.tick;
+  const collectivesStream = rngSuite.collectives;
 
   const world = restoreWorld(serialized.world);
   const agents = serialized.agents.map((agent) => restoreAgent(agent));
@@ -107,6 +105,7 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
       tick: tickStream,
       collectives: collectivesStream,
     },
+    randomnessMode,
     stageCounts: { ...serialized.stageCounts },
     nextAgentId: serialized.nextAgentId,
     nextHouseId,

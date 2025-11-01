@@ -148,6 +148,7 @@ export interface SerializedSimulationState {
   tick: number;
   scenarioId: string;
   seed: string;
+  randomnessMode: SimulationState['randomnessMode'];
   world: SerializedWorldState;
   agents: SerializedAgentState[];
   houses: SerializedHouseState[];
@@ -185,6 +186,7 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     tick: state.tick,
     scenarioId: state.scenarioId,
     seed: state.seed,
+    randomnessMode: state.randomnessMode,
     world: serializeWorld(state.world),
     agents: state.agents.map(serializeAgent),
     houses: state.houses.map(serializeHouse),
