@@ -10,7 +10,7 @@ import {
   type ResourceType,
   restoreHouseCapacityController,
 } from '../engine/collectives.ts';
-import { restoreModeAwareRngSuite } from '../engine/rng.ts';
+import { createModeAwareRngSuite, restoreModeAwareRngSuite } from '../engine/rng.ts';
 import { cloneBrainDecision, restoreBrainState } from '../engine/brain.ts';
 import {
   cloneAgentChromosomes,
@@ -26,6 +26,7 @@ import {
   type SerializedCityState,
   type SerializedHouseState,
   type SerializedMovementState,
+  type SerializedRandomnessMetadata,
   type SerializedSimulationState,
   type SerializedWorldState,
   type SerializedReproductiveGroup,
@@ -50,9 +51,41 @@ export async function loadSimulationState(id: string): Promise<SimulationState |
   return restoreSimulationState(record.state);
 }
 
+function ensureRunId(
+  mode: SimulationState['randomnessMode'],
+  randomness: SerializedRandomnessMetadata | null | undefined,
+  seedHint: string,
+): string {
+  if (randomness?.runId) {
+    return randomness.runId;
+  }
+  if (mode === 'deterministic') {
+    const normalized = seedHint && seedHint.length > 0 ? seedHint : '0';
+    return `det-${normalized}`;
+  }
+  const globalObject: typeof globalThis | undefined =
+    typeof globalThis === 'object' && globalThis ? globalThis : undefined;
+  const maybeCrypto = globalObject && 'crypto' in globalObject ? globalObject.crypto : undefined;
+  const uuid = maybeCrypto && typeof maybeCrypto.randomUUID === 'function'
+    ? maybeCrypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `cha-legacy-${uuid}`;
+}
+
 export function restoreSimulationState(serialized: SerializedSimulationState): SimulationState {
-  const randomnessMode = serialized.randomnessMode ?? 'deterministic';
-  const rngSuite = restoreModeAwareRngSuite(randomnessMode, serialized.rng);
+  const randomnessSource = (serialized as Partial<SerializedSimulationState>).randomness ?? null;
+  const randomnessMode = randomnessSource?.mode ?? serialized.randomnessMode ?? 'deterministic';
+  const rootSeed =
+    randomnessSource?.rootSeed ?? (randomnessMode === 'deterministic' ? serialized.seed : null);
+  const seedHint = rootSeed ?? serialized.seed ?? '';
+  const runId = ensureRunId(randomnessMode, randomnessSource ?? null, seedHint);
+
+  const rngSuite =
+    randomnessMode === 'deterministic'
+      ? serialized.rng
+        ? restoreModeAwareRngSuite('deterministic', serialized.rng)
+        : createModeAwareRngSuite('deterministic', rootSeed ?? serialized.seed)
+      : createModeAwareRngSuite('chaotic');
   const rootRng = rngSuite.root;
   const worldStream = rngSuite.world;
   const agentStream = rngSuite.agentSpawn;
@@ -106,6 +139,10 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
       collectives: collectivesStream,
     },
     randomnessMode,
+    randomnessMeta: {
+      runId,
+      rootSeed,
+    },
     stageCounts: { ...serialized.stageCounts },
     nextAgentId: serialized.nextAgentId,
     nextHouseId,

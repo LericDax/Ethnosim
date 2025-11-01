@@ -43,6 +43,15 @@ export interface SnapshotAgent {
   } | null;
 }
 
+export interface SnapshotRandomnessMetadata {
+  mode?: 'deterministic' | 'chaotic';
+  runId?: string;
+  seed?: string;
+  seedHex?: string;
+  rootSeed?: string | null;
+  rootSeedHex?: string | null;
+}
+
 export interface Snapshot {
   type?: string;
   tick?: number;
@@ -52,6 +61,8 @@ export interface Snapshot {
   houses?: SnapshotHouse[];
   city?: SnapshotCity | null;
   leadership?: SnapshotLeadership;
+  randomness?: SnapshotRandomnessMetadata;
+  randomnessMode?: 'deterministic' | 'chaotic';
 }
 
 export interface SnapshotHouse {

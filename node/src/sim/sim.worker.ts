@@ -131,6 +131,11 @@ interface SimulationRng {
   collectives: RngStream;
 }
 
+export interface SimulationRandomnessMetadata {
+  runId: string;
+  rootSeed: string | null;
+}
+
 export interface SimulationState {
   tick: number;
   world: WorldState;
@@ -139,6 +144,7 @@ export interface SimulationState {
   city: CityState | null;
   rng: SimulationRng;
   randomnessMode: RandomnessMode;
+  randomnessMeta: SimulationRandomnessMetadata;
   stageCounts: StageCounts;
   nextAgentId: number;
   nextHouseId: number;
@@ -358,6 +364,15 @@ interface SnapshotDemand {
   expiresAtTick: number;
 }
 
+export interface SnapshotRandomnessMetadata {
+  mode: RandomnessMode;
+  runId: string;
+  seed: string;
+  seedHex: string;
+  rootSeed: string | null;
+  rootSeedHex: string | null;
+}
+
 export interface Snapshot {
   type: 'SNAPSHOT';
   version: number;
@@ -365,6 +380,7 @@ export interface Snapshot {
   seed: number;
   seedHex: string;
   randomnessMode: RandomnessMode;
+  randomness: SnapshotRandomnessMetadata;
   tick: number;
   world: { width: number; height: number; w: number; h: number };
   agents: SnapshotAgent[];
@@ -654,6 +670,21 @@ function sanitizeTicksPerUpdate(value: number | undefined): number {
   return clamped;
 }
 
+function generateRunId(mode: RandomnessMode, seedHint: string): string {
+  if (mode === 'deterministic') {
+    const normalized = seedHint && seedHint.length > 0 ? seedHint : '0';
+    return `det-${normalized}`;
+  }
+  const prefix = 'cha';
+  const globalObject: typeof globalThis | undefined =
+    typeof globalThis === 'object' && globalThis ? globalThis : undefined;
+  const maybeCrypto = globalObject && 'crypto' in globalObject ? globalObject.crypto : undefined;
+  const uuid = maybeCrypto && typeof maybeCrypto.randomUUID === 'function'
+    ? maybeCrypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefix}-${uuid}`;
+}
+
 export function createSimulationState(config: SimulationConfig): SimulationState {
   const { id: scenarioId, config: scenarioConfig } = resolveScenario(config.scenarioId ?? null);
   const defaults = scenarioToSimulationDefaults(scenarioConfig);
@@ -671,6 +702,10 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   const agentStream = rngSuite.agentSpawn;
   const tickStream = rngSuite.tick;
   const collectivesStream = rngSuite.collectives;
+  const randomnessMeta: SimulationRandomnessMetadata = {
+    runId: generateRunId(randomnessMode, seedString),
+    rootSeed: randomnessMode === 'deterministic' ? seedString : null,
+  };
 
   const world = createWorld(width, height, worldStream);
   const chromosomeRegistry = buildChromosomeRegistry(
@@ -707,6 +742,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
       collectives: collectivesStream,
     },
     randomnessMode,
+    randomnessMeta,
     stageCounts,
     nextAgentId: agents.length,
     nextHouseId: houses.length,
@@ -1746,6 +1782,9 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
   const seedBigInt = isChaotic ? 0n : safeBigInt(simulation.seed);
   const limitedSeed = Number(seedBigInt & SAFE_NUMBER_MASK);
   const seedHex = isChaotic ? 'chaotic' : `0x${seedBigInt.toString(16)}`;
+  const rootSeedString = simulation.randomnessMeta?.rootSeed ?? null;
+  const rootSeedBigInt = rootSeedString ? safeBigInt(rootSeedString) : 0n;
+  const rootSeedHex = rootSeedString ? `0x${rootSeedBigInt.toString(16)}` : null;
 
   return {
     type: 'SNAPSHOT',
@@ -1754,6 +1793,14 @@ export function createSnapshot(simulation: SimulationState): Snapshot {
     seed: Number.isFinite(limitedSeed) && !isChaotic ? limitedSeed : 0,
     seedHex,
     randomnessMode: simulation.randomnessMode,
+    randomness: {
+      mode: simulation.randomnessMode,
+      runId: simulation.randomnessMeta.runId,
+      seed: simulation.seed,
+      seedHex,
+      rootSeed: rootSeedString,
+      rootSeedHex,
+    },
     tick: simulation.tick,
     world: {
       width: simulation.world.width,
