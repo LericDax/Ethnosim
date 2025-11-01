@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createSimulationState, stepSimulationState } from '../src/sim/sim.worker.ts';
 import { isForestTile } from '../src/sim/engine/world.ts';
+import { updateCollectiveDemands } from '../src/sim/engine/collectives.ts';
+import { createInitialMovementState, moveAgent } from '../src/sim/engine/move.ts';
 
 function findForestTile(simulation: ReturnType<typeof createSimulationState>): { x: number; y: number } {
   for (let y = simulation.world.height - 1; y >= 0; y -= 1) {
@@ -45,5 +47,60 @@ describe('resource gathering', () => {
     stepSimulationState(simulation);
 
     expect(agent.carriedResources.wood).toBeGreaterThan(initialWood);
+  });
+
+  it('prioritizes build-forage when the household lacks wood', () => {
+    const simulation = createSimulationState({ agentCount: 6, worldSize: [24, 24], seed: 'housing-wood-demand' });
+    const adult = simulation.agents.find((entry) => entry.lifeStage === 'adult');
+    expect(adult).toBeDefined();
+    if (!adult) {
+      return;
+    }
+
+    const additionalMember = simulation.agents.find((entry) => entry.id !== adult.id);
+    expect(additionalMember).toBeDefined();
+    if (!additionalMember) {
+      return;
+    }
+    const house = simulation.houses[0];
+    house.members = [adult.id, additionalMember.id];
+    house.maxMembers = 1;
+    house.preferredMembers = 1;
+    house.capacityPressure = house.members.length - 1;
+    house.construction.active = false;
+    house.construction.progress = 0;
+    house.construction.required = Math.max(1, house.construction.required);
+    house.activeDemand = {};
+    house.leaderDirectives = {};
+
+    adult.houseId = house.id;
+    additionalMember.houseId = house.id;
+    adult.movement = createInitialMovementState();
+    adult.brain.currentNodeId = 'Rest';
+    adult.brain.nodeTimer = 4;
+
+    simulation.pendingHouseAssignments = ['wait-1', 'wait-2'];
+    updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
+      rng: simulation.rng.collectives,
+      pendingAssignmentCount: simulation.pendingHouseAssignments.length,
+    });
+
+    expect(house.activeDemand.wood ?? 0).toBeGreaterThan(0);
+
+    const agentsById = new Map(simulation.agents.map((entry) => [entry.id, entry]));
+    const housesById = new Map([[house.id, house]]);
+    moveAgent(
+      adult,
+      {
+        world: simulation.world,
+        agentsById,
+        housesById,
+        city: simulation.city,
+        tick: simulation.tick,
+      },
+      simulation.rng.tick,
+    );
+
+    expect(adult.movement.behaviorId).toBe('build-forage');
   });
 });

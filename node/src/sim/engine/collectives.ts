@@ -807,7 +807,7 @@ export function updateCollectiveDemands(
   city: CityState | null,
   agents: HouseAssignableAgent[],
   currentTick: number,
-  options: { rng?: RngStream | null } = {},
+  options: { rng?: RngStream | null; pendingAssignmentCount?: number } = {},
 ): void {
   if (agents.length === 0) {
     return;
@@ -849,8 +849,11 @@ export function updateCollectiveDemands(
     }
   }
 
+  const pendingAssignments = Math.max(0, options.pendingAssignmentCount ?? 0);
+
   for (const house of houses) {
     runHouseScheduler(house, { currentTick, rng: options.rng ?? null });
+    applyHouseWoodDemand(house, pendingAssignments);
     if (house.members.length === 0) {
       continue;
     }
@@ -869,6 +872,44 @@ export function updateCollectiveDemands(
       applyDemandMultipliers(demand, house.leaderDirectives);
     }
   }
+}
+
+function applyHouseWoodDemand(house: HouseState, pendingAssignments: number): void {
+  const multiplier = calculateWoodDemandMultiplier(house, pendingAssignments);
+  if (multiplier > 0) {
+    house.activeDemand.wood = multiplier;
+  } else {
+    delete house.activeDemand.wood;
+  }
+}
+
+function calculateWoodDemandMultiplier(house: HouseState, pendingAssignments: number): number {
+  let intensity = 0;
+
+  const capacityPressure = Math.max(0, house.capacityPressure);
+  if (capacityPressure > 0) {
+    const cappedPressure = Math.min(capacityPressure, 6);
+    intensity += 0.35 + cappedPressure * 0.3;
+  }
+
+  if (house.construction.active) {
+    const required = Math.max(1, house.construction.required);
+    const remaining = Math.max(0, house.construction.required - house.construction.progress);
+    const normalized = remaining / required;
+    intensity += 0.75 + normalized * 0.85;
+  }
+
+  const backlog = Math.max(0, Math.min(pendingAssignments, 12));
+  if (backlog > 0) {
+    intensity += backlog * 0.12;
+  }
+
+  if (intensity <= 0) {
+    return 0;
+  }
+
+  const cappedIntensity = Math.min(intensity, 3);
+  return 1 + cappedIntensity;
 }
 
 interface LeadershipCandidateEvaluation {

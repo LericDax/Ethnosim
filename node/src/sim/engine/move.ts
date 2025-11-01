@@ -951,16 +951,18 @@ registerMovementBehavior({
   id: 'build-forage',
   score({ tags, houseDemand, metadata }) {
     const buildTag = tags.includes('build') || tags.includes('work') || metadata.id === 'BuildDwelling';
-    const needsWood = (houseDemand.wood ?? 0) > 0.2;
-    if (!buildTag && !needsWood) {
+    const woodSignal = houseDemand.wood ?? 0;
+    const woodPressure = woodSignal > 1 ? woodSignal - 1 : 0;
+    if (!buildTag && woodPressure <= 0) {
       return 0;
     }
-    let score = 0.6;
+    let score = 0.45;
     if (buildTag) {
       score += 0.5;
     }
-    if (needsWood) {
-      score += 0.4;
+    if (woodPressure > 0) {
+      const cappedPressure = Math.min(woodPressure, 3);
+      score += 0.65 + cappedPressure * 0.35;
     }
     return score;
   },
@@ -992,7 +994,7 @@ registerMovementBehavior({
     if (isCloseTo(agent, deliverTarget, reach * reach)) {
       state.data.phase = 'harvest';
       const lingering = 1 + Math.floor(stream.nextFloat() * 2);
-      const stillNeedsWood = (input.houseDemand.wood ?? 0) > 0.5;
+      const stillNeedsWood = (input.houseDemand.wood ?? 0) > 1.05;
       return {
         target: deliverTarget,
         lingerTicks: lingering,
