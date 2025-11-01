@@ -731,6 +731,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   }
   updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
     rng: simulation.rng.collectives,
+    pendingAssignmentCount: simulation.pendingHouseAssignments.length,
   });
   updateLeadershipLedger(simulation);
 
@@ -950,6 +951,7 @@ export function stepSimulationState(simulation: SimulationState): void {
   }
   updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
     rng: simulation.rng.collectives,
+    pendingAssignmentCount: simulation.pendingHouseAssignments.length,
   });
   updateLeadershipLedger(simulation);
 
@@ -1292,6 +1294,7 @@ function reconcileHousingAfterCapacityChange(simulation: SimulationState): void 
   }
   updateCollectiveDemands(simulation.houses, simulation.city, simulation.agents, simulation.tick, {
     rng: simulation.rng.collectives,
+    pendingAssignmentCount: simulation.pendingHouseAssignments.length,
   });
   updateLeadershipLedger(simulation);
 }
