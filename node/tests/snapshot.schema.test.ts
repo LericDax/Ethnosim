@@ -7,7 +7,11 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
   expect(typeof snapshot.scenarioId).toBe('string');
   expect(typeof snapshot.seed).toBe('number');
   expect(typeof snapshot.seedHex).toBe('string');
-  expect(snapshot.seedHex.startsWith('0x')).toBe(true);
+  if (snapshot.randomnessMode === 'deterministic') {
+    expect(snapshot.seedHex.startsWith('0x')).toBe(true);
+  } else {
+    expect(snapshot.seedHex).toBe('chaotic');
+  }
   expect(typeof snapshot.tick).toBe('number');
   expect(snapshot.world).toBeTruthy();
   expect(typeof snapshot.world.width).toBe('number');
@@ -72,6 +76,24 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof decision.from).toBe('string');
     expect(typeof decision.to).toBe('string');
   }
+
+  expect(snapshot.randomness).toBeTruthy();
+  expect(snapshot.randomness.mode).toBe(snapshot.randomnessMode);
+  expect(typeof snapshot.randomness.runId).toBe('string');
+  if (snapshot.randomnessMode === 'deterministic') {
+    expect(snapshot.randomness.runId.startsWith('det-')).toBe(true);
+  } else {
+    expect(snapshot.randomness.runId.startsWith('cha-')).toBe(true);
+  }
+  expect(snapshot.randomness.seedHex).toBe(snapshot.seedHex);
+  expect(typeof snapshot.randomness.seed).toBe('string');
+  if (snapshot.randomnessMode === 'deterministic') {
+    expect(snapshot.randomness.rootSeed).toBeTypeOf('string');
+    expect(snapshot.randomness.rootSeedHex?.startsWith('0x')).toBe(true);
+  } else {
+    expect(snapshot.randomness.rootSeed).toBeNull();
+    expect(snapshot.randomness.rootSeedHex).toBeNull();
+  }
 }
 
 describe('snapshot schema compatibility', () => {
@@ -81,6 +103,7 @@ describe('snapshot schema compatibility', () => {
       stepSimulationState(state);
     }
     const snapshot = createSnapshot(state);
+    expect(snapshot.randomness.seed).toBe(state.seed);
     assertSnapshotMatchesSharedContract(snapshot);
   });
 });

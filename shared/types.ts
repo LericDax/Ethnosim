@@ -183,9 +183,23 @@ export interface SnapshotStageStats {
   adult: number;
 }
 
+export interface SnapshotRandomnessMetadata {
+  mode: 'deterministic' | 'chaotic';
+  runId: string;
+  seed: string;
+  seedHex: string;
+  rootSeed: string | null;
+  rootSeedHex: string | null;
+}
+
 export interface SnapshotMetadata {
   type: 'SNAPSHOT';
+  version?: number;
+  scenarioId?: string;
   seed: number;
+  seedHex?: string;
+  randomnessMode?: SnapshotRandomnessMetadata['mode'];
+  randomness?: SnapshotRandomnessMetadata;
   tick: number;
   world: SnapshotWorldSize;
   agents: SnapshotAgent[];

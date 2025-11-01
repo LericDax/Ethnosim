@@ -143,17 +143,24 @@ export interface SerializedSimulationRng {
   };
 }
 
+export interface SerializedRandomnessMetadata {
+  mode: SimulationState['randomnessMode'];
+  runId: string;
+  rootSeed: string | null;
+}
+
 export interface SerializedSimulationState {
   version: number;
   tick: number;
   scenarioId: string;
   seed: string;
   randomnessMode: SimulationState['randomnessMode'];
+  randomness: SerializedRandomnessMetadata | null;
   world: SerializedWorldState;
   agents: SerializedAgentState[];
   houses: SerializedHouseState[];
   city: SerializedCityState | null;
-  rng: SerializedSimulationRng;
+  rng: SerializedSimulationRng | null;
   stageCounts: SimulationState['stageCounts'];
   nextAgentId: number;
   nextHouseId: number;
@@ -187,11 +194,16 @@ export function serializeSimulationState(state: SimulationState): SerializedSimu
     scenarioId: state.scenarioId,
     seed: state.seed,
     randomnessMode: state.randomnessMode,
+    randomness: {
+      mode: state.randomnessMode,
+      runId: state.randomnessMeta.runId,
+      rootSeed: state.randomnessMeta.rootSeed,
+    },
     world: serializeWorld(state.world),
     agents: state.agents.map(serializeAgent),
     houses: state.houses.map(serializeHouse),
     city: state.city ? serializeCity(state.city) : null,
-    rng: serializeRng(state),
+    rng: state.randomnessMode === 'deterministic' ? serializeRng(state) : null,
     stageCounts: { ...state.stageCounts },
     nextAgentId: state.nextAgentId,
     nextHouseId: state.nextHouseId,
