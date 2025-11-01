@@ -218,11 +218,18 @@ interface SnapshotBrainPulse {
   family?: string;
 }
 
+interface SnapshotBrainFill {
+  ratios: Record<string, number>;
+  containsRecentCharge: boolean;
+  lockedNodeId: string | null;
+}
+
 interface SnapshotBrainData {
   summary: SnapshotBrainSummary;
   state: SerializedBrainState;
   pulses: SnapshotBrainPulse[];
   fillRatios: Record<string, number>;
+  nodeFill?: SnapshotBrainFill | null;
 }
 
 interface SnapshotAgent {
@@ -1584,31 +1591,102 @@ function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
     .slice(0, MAX_SNAPSHOT_PULSES);
 }
 
-function extractSnapshotFillRatios(brain: BrainState): Record<string, number> {
-  if (brain.nodeCharge.size === 0) {
-    return {};
+function extractSnapshotFillRatios(brain: BrainState): SnapshotBrainFill | null {
+  const combined = new Map<
+    string,
+    {
+      ratio: number;
+      fromCache: boolean;
+    }
+  >();
+  let containsRecentCharge = false;
+  let strongestCachedNode: string | null = null;
+  let strongestCachedRatio = -Infinity;
+
+  for (const [nodeId, charge] of brain.nodeCharge.entries()) {
+    const metadata = getNodeMetadata(brain.brainId, nodeId);
+    const capacity = charge?.capacity ?? metadata.chargeCapacity;
+    const safeCapacity = capacity > 0 ? capacity : 1;
+    const ratio = clamp01((charge?.value ?? 0) / safeCapacity);
+    if (ratio <= 0 || !nodeId) {
+      continue;
+    }
+    combined.set(nodeId, { ratio, fromCache: false });
   }
-  const entries = Array.from(brain.nodeCharge.entries())
-    .map(([nodeId, charge]) => {
-      const metadata = getNodeMetadata(brain.brainId, nodeId);
-      const capacity = charge?.capacity ?? metadata.chargeCapacity;
-      const safeCapacity = capacity > 0 ? capacity : 1;
-      const ratio = clamp01((charge?.value ?? 0) / safeCapacity);
-      return { nodeId, ratio };
-    })
+
+  for (const [nodeId, charge] of brain.recentCharge.entries()) {
+    const metadata = getNodeMetadata(brain.brainId, nodeId);
+    const capacity = charge?.capacity ?? metadata.chargeCapacity;
+    const safeCapacity = capacity > 0 ? capacity : 1;
+    const ratio = clamp01((charge?.value ?? 0) / safeCapacity);
+    if (ratio <= 0 || !nodeId) {
+      continue;
+    }
+    containsRecentCharge = true;
+    if (ratio > strongestCachedRatio) {
+      strongestCachedRatio = ratio;
+      strongestCachedNode = nodeId;
+    }
+    const existing = combined.get(nodeId);
+    if (!existing || existing.fromCache) {
+      combined.set(nodeId, { ratio, fromCache: true });
+    }
+  }
+
+  if (combined.size === 0) {
+    return null;
+  }
+
+  let lockedNodeId = brain.lastDecision?.chosenNodeId ?? null;
+  if (lockedNodeId && !combined.has(lockedNodeId)) {
+    lockedNodeId = null;
+  }
+  if (!lockedNodeId && strongestCachedNode && combined.has(strongestCachedNode)) {
+    lockedNodeId = strongestCachedNode;
+  }
+
+  if (lockedNodeId) {
+    const entry = combined.get(lockedNodeId);
+    if (entry) {
+      entry.ratio = 1;
+      combined.set(lockedNodeId, entry);
+    }
+  }
+
+  const entries = Array.from(combined.entries())
+    .map(([nodeId, info]) => ({ nodeId, ratio: clamp01(info.ratio) }))
     .filter((entry) => entry.nodeId && entry.ratio > 0)
-    .sort((a, b) => b.ratio - a.ratio);
+    .sort((a, b) => b.ratio - a.ratio || a.nodeId.localeCompare(b.nodeId));
 
   const limited = entries.slice(0, MAX_SNAPSHOT_FILL_NODES);
+  if (lockedNodeId) {
+    const hasLocked = limited.some((entry) => entry.nodeId === lockedNodeId);
+    if (!hasLocked) {
+      const lockedEntry = entries.find((entry) => entry.nodeId === lockedNodeId);
+      if (lockedEntry) {
+        if (limited.length >= MAX_SNAPSHOT_FILL_NODES) {
+          limited[limited.length - 1] = lockedEntry;
+        } else {
+          limited.push(lockedEntry);
+        }
+        limited.sort((a, b) => b.ratio - a.ratio || a.nodeId.localeCompare(b.nodeId));
+      }
+    }
+  }
   if (!limited.length) {
-    return {};
+    return null;
   }
 
-  const result: Record<string, number> = {};
+  const ratios: Record<string, number> = {};
   for (const entry of limited) {
-    result[entry.nodeId] = roundTo(entry.ratio);
+    ratios[entry.nodeId] = roundTo(entry.ratio);
   }
-  return result;
+
+  return {
+    ratios,
+    containsRecentCharge,
+    lockedNodeId,
+  } satisfies SnapshotBrainFill;
 }
 
 const SAFE_NUMBER_MASK = BigInt('0x1fffffffffffff');
@@ -1787,7 +1865,8 @@ function createBrainSnapshot(
   const elapsedTicks = Math.max(0, safeDurationTicks - Math.min(remainingTicks, safeDurationTicks));
   const tickDurationMs = computeEffectiveTickDurationMs();
   const pulses = extractSnapshotBrainPulses(brain);
-  const fillRatios = extractSnapshotFillRatios(brain);
+  const fillInfo = extractSnapshotFillRatios(brain);
+  const fillRatios = fillInfo?.ratios ?? {};
   const transition: SnapshotBrainTransitionTiming = {
     durationTicks: safeDurationTicks,
     remainingTicks,
@@ -1813,6 +1892,7 @@ function createBrainSnapshot(
     state: serializeBrainState(brain),
     pulses,
     fillRatios,
+    nodeFill: fillInfo,
   };
 }
 

@@ -109,19 +109,24 @@ function computeDataSignature(data) {
         .sort()
         .join(';')
     : 'none';
-  const nodeFill =
-    data.nodeFill && typeof data.nodeFill === 'object'
-      ? data.nodeFill
-      : data.fillRatios && typeof data.fillRatios === 'object'
-        ? data.fillRatios
-        : null;
-  const fillPart = nodeFill
-    ? Object.entries(nodeFill)
+  const rawNodeFill = data.nodeFill && typeof data.nodeFill === 'object' ? data.nodeFill : null;
+  const nodeFillRatios = rawNodeFill
+    ? rawNodeFill.ratios && typeof rawNodeFill.ratios === 'object'
+      ? rawNodeFill.ratios
+      : rawNodeFill
+    : data.fillRatios && typeof data.fillRatios === 'object'
+      ? data.fillRatios
+      : null;
+  const fillPart = nodeFillRatios
+    ? Object.entries(nodeFillRatios)
         .map(([nodeId, value]) => `${nodeId}:${Number(value ?? 0).toFixed(3)}`)
         .sort()
         .join(';')
     : 'none';
-  return `${nodePart}__${edgePart}__${current}__${decision}__${pulsesPart}__${fillPart}`;
+  const fillMetaPart = rawNodeFill
+    ? `${rawNodeFill.lockedNodeId ?? ''}|${rawNodeFill.containsRecentCharge ? 1 : 0}`
+    : 'none';
+  return `${nodePart}__${edgePart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}`;
 }
 
 function resolveClampValue(viewportClamp, minHeight) {
@@ -229,6 +234,7 @@ export class BrainViewer {
     this._edgeSegments = [];
     this._nodeDurations = new Map();
     this._nodeFillRatios = new Map();
+    this._nodeFillContext = null;
     this._nextFillNodeId = null;
     this._activePulses = [];
     this._pixelRatio = window.devicePixelRatio || 1;
@@ -286,9 +292,21 @@ export class BrainViewer {
 
     const pulses = Array.isArray(data?.pulses) ? data.pulses : [];
     const fillRatios = this._extractFillRatios(data);
+    const fillContext = this._nodeFillContext;
     this._updateSimulationClock(transition);
     const signatureSource = data
-      ? { ...data, pulses, nodeFill: fillRatios ?? undefined }
+      ? {
+          ...data,
+          pulses,
+          nodeFill:
+            fillContext != null
+              ? {
+                  lockedNodeId: fillContext.lockedNodeId ?? null,
+                  containsRecentCharge: Boolean(fillContext.containsRecentCharge),
+                  ratios: fillRatios ?? {},
+                }
+              : fillRatios ?? undefined,
+        }
       : data;
     const signature = computeDataSignature(signatureSource);
     if (signature === this._dataSignature) {
@@ -423,12 +441,25 @@ export class BrainViewer {
   }
 
   _extractFillRatios(data) {
+    this._nodeFillContext = null;
     if (!data || typeof data !== 'object') {
       return null;
     }
-    const nodeFill = data.nodeFill && typeof data.nodeFill === 'object' ? data.nodeFill : null;
-    if (nodeFill) {
-      return nodeFill;
+    const nodeFillRaw = data.nodeFill && typeof data.nodeFill === 'object' ? data.nodeFill : null;
+    if (nodeFillRaw) {
+      const ratios =
+        nodeFillRaw.ratios && typeof nodeFillRaw.ratios === 'object' ? nodeFillRaw.ratios : nodeFillRaw;
+      const lockedNodeId =
+        typeof nodeFillRaw.lockedNodeId === 'string' && nodeFillRaw.lockedNodeId
+          ? nodeFillRaw.lockedNodeId
+          : null;
+      const containsRecentCharge = Boolean(nodeFillRaw.containsRecentCharge);
+      this._nodeFillContext = {
+        ratios,
+        lockedNodeId,
+        containsRecentCharge,
+      };
+      return ratios;
     }
     if (data.fillRatios && typeof data.fillRatios === 'object') {
       return data.fillRatios;
