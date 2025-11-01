@@ -1,4 +1,4 @@
-import { createSeededRng, type SeededRng, type RngStream } from './engine/rng.ts';
+import { createModeAwareRngSuite, type SeededRng, type RngStream } from './engine/rng.ts';
 import {
   createBrainState,
   tickBrain,
@@ -69,6 +69,8 @@ import type { ReproductiveGroup } from './engine/repro.ts';
 
 export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
+export type RandomnessMode = 'deterministic' | 'chaotic';
+
 export interface Temperament {
   trustBias: number;
   fearBias: number;
@@ -136,6 +138,7 @@ export interface SimulationState {
   houses: HouseState[];
   city: CityState | null;
   rng: SimulationRng;
+  randomnessMode: RandomnessMode;
   stageCounts: StageCounts;
   nextAgentId: number;
   nextHouseId: number;
@@ -154,6 +157,7 @@ export interface SimulationConfig {
   agentCount?: number;
   seed?: number | string | bigint | null;
   scenarioId?: string | null;
+  randomnessMode?: RandomnessMode;
 }
 
 type SnapshotResourceBundle = Record<ResourceType, number>;
@@ -360,6 +364,7 @@ export interface Snapshot {
   scenarioId: string;
   seed: number;
   seedHex: string;
+  randomnessMode: RandomnessMode;
   tick: number;
   world: { width: number; height: number; w: number; h: number };
   agents: SnapshotAgent[];
@@ -385,6 +390,7 @@ interface WorkerInitMessage {
   agentCount?: number;
   seed?: number | string | bigint | null;
   scenarioId?: string | null;
+  randomnessMode?: RandomnessMode;
   intervalMs?: number;
   ticksPerUpdate?: number;
 }
@@ -513,6 +519,7 @@ function initializeSimulation(message: WorkerInitMessage): void {
   const config: SimulationConfig = {
     seed: message.seed,
     scenarioId: message.scenarioId ?? null,
+    randomnessMode: message.randomnessMode ?? 'deterministic',
   };
   if (message.worldSize) {
     config.worldSize = message.worldSize;
@@ -657,12 +664,13 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   const desiredAgentCount = config.agentCount ?? defaults.agentCount;
   const agentCount = Math.max(1, Math.floor(desiredAgentCount));
 
-  const rootRng = createSeededRng(config.seed);
-  const seedString = rootRng.serialize().seed;
-  const worldStream = rootRng.stream('world');
-  const agentStream = rootRng.stream('agent-spawn');
-  const tickStream = rootRng.stream('tick');
-  const collectivesStream = rootRng.stream('collectives');
+  const randomnessMode = config.randomnessMode ?? 'deterministic';
+  const rngSuite = createModeAwareRngSuite(randomnessMode, config.seed);
+  const seedString = rngSuite.root.serialize().seed;
+  const worldStream = rngSuite.world;
+  const agentStream = rngSuite.agentSpawn;
+  const tickStream = rngSuite.tick;
+  const collectivesStream = rngSuite.collectives;
 
   const world = createWorld(width, height, worldStream);
   const chromosomeRegistry = buildChromosomeRegistry(
@@ -692,12 +700,13 @@ export function createSimulationState(config: SimulationConfig): SimulationState
     houses,
     city,
     rng: {
-      root: rootRng,
+      root: rngSuite.root,
       world: worldStream,
       agentSpawn: agentStream,
       tick: tickStream,
       collectives: collectivesStream,
     },
+    randomnessMode,
     stageCounts,
     nextAgentId: agents.length,
     nextHouseId: houses.length,
@@ -1733,16 +1742,18 @@ function extractSnapshotFillRatios(brain: BrainState): SnapshotBrainFill | null 
 const SAFE_NUMBER_MASK = BigInt('0x1fffffffffffff');
 
 export function createSnapshot(simulation: SimulationState): Snapshot {
-  const seedBigInt = safeBigInt(simulation.seed);
+  const isChaotic = simulation.randomnessMode === 'chaotic';
+  const seedBigInt = isChaotic ? 0n : safeBigInt(simulation.seed);
   const limitedSeed = Number(seedBigInt & SAFE_NUMBER_MASK);
-  const seedHex = `0x${seedBigInt.toString(16)}`;
+  const seedHex = isChaotic ? 'chaotic' : `0x${seedBigInt.toString(16)}`;
 
   return {
     type: 'SNAPSHOT',
     version: 2,
     scenarioId: simulation.scenarioId,
-    seed: Number.isFinite(limitedSeed) ? limitedSeed : 0,
+    seed: Number.isFinite(limitedSeed) && !isChaotic ? limitedSeed : 0,
     seedHex,
+    randomnessMode: simulation.randomnessMode,
     tick: simulation.tick,
     world: {
       width: simulation.world.width,

@@ -1,3 +1,6 @@
+import type { SerializedSimulationRng } from '../io/save.ts';
+import type { RandomnessMode } from '../sim.worker.ts';
+
 export interface SerializedRngStream {
   state: string;
   increment: string;
@@ -20,6 +23,10 @@ export interface SeededRng {
   stream(label: string): RngStream;
   spawn(label: string): SeededRng;
   serialize(): SerializedSeededRng;
+}
+
+interface CryptoLike {
+  getRandomValues?(array: Uint32Array): Uint32Array;
 }
 
 const MOD_MASK = (1n << 64n) - 1n;
@@ -165,4 +172,115 @@ export function createSeededRng(seed?: number | string | bigint | null): SeededR
 export function restoreSeededRng(serialized: SerializedSeededRng): SeededRng {
   const seed = serialized?.seed ? BigInt(serialized.seed) & MOD_MASK : DEFAULT_SEED;
   return createSeededRngInternal(seed, serialized ?? null);
+}
+
+class ChaoticStream implements RngStream {
+  nextUint32(): number {
+    return randomUint32();
+  }
+
+  nextFloat(): number {
+    return this.nextUint32() / 0x100000000;
+  }
+
+  serialize(): SerializedRngStream {
+    return { state: 'chaotic', increment: 'chaotic' };
+  }
+
+  // Chaotic streams are stateless; restoring is a no-op.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  restore(_serialized: SerializedRngStream): void {}
+}
+
+class ChaoticSeededRng implements SeededRng {
+  private streamCache = new Map<string, ChaoticStream>();
+
+  private childCache = new Map<string, SeededRng>();
+
+  stream(label: string): RngStream {
+    if (!this.streamCache.has(label)) {
+      this.streamCache.set(label, new ChaoticStream());
+    }
+    return this.streamCache.get(label)!;
+  }
+
+  spawn(label: string): SeededRng {
+    if (!this.childCache.has(label)) {
+      this.childCache.set(label, new ChaoticSeededRng());
+    }
+    return this.childCache.get(label)!;
+  }
+
+  serialize(): SerializedSeededRng {
+    return { seed: 'chaotic', streams: {}, children: {} };
+  }
+}
+
+function randomUint32(): number {
+  const cryptoLike =
+    typeof globalThis === 'object' && globalThis
+      ? (globalThis as { crypto?: CryptoLike }).crypto
+      : undefined;
+  if (cryptoLike && typeof cryptoLike.getRandomValues === 'function') {
+    const buffer = new Uint32Array(1);
+    cryptoLike.getRandomValues(buffer);
+    return buffer[0]! >>> 0;
+  }
+  return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+function createChaoticSeededRng(): SeededRng {
+  return new ChaoticSeededRng();
+}
+
+export function createModeAwareSeededRng(
+  mode: RandomnessMode,
+  seed?: number | string | bigint | null,
+): SeededRng {
+  return mode === 'chaotic' ? createChaoticSeededRng() : createSeededRng(seed);
+}
+
+export function restoreModeAwareSeededRng(
+  mode: RandomnessMode,
+  serialized: SerializedSeededRng,
+): SeededRng {
+  return mode === 'chaotic' ? createChaoticSeededRng() : restoreSeededRng(serialized);
+}
+
+export interface ModeAwareSimulationRng {
+  root: SeededRng;
+  world: RngStream;
+  agentSpawn: RngStream;
+  tick: RngStream;
+  collectives: RngStream;
+}
+
+export function createModeAwareRngSuite(
+  mode: RandomnessMode,
+  seed?: number | string | bigint | null,
+): ModeAwareSimulationRng {
+  const root = createModeAwareSeededRng(mode, seed);
+  return {
+    root,
+    world: root.stream('world'),
+    agentSpawn: root.stream('agent-spawn'),
+    tick: root.stream('tick'),
+    collectives: root.stream('collectives'),
+  };
+}
+
+export function restoreModeAwareRngSuite(
+  mode: RandomnessMode,
+  serialized: SerializedSimulationRng,
+): ModeAwareSimulationRng {
+  const root = restoreModeAwareSeededRng(mode, serialized.root);
+  const world = root.stream('world');
+  world.restore(serialized.streams.world);
+  const agentSpawn = root.stream('agent-spawn');
+  agentSpawn.restore(serialized.streams.agentSpawn);
+  const tick = root.stream('tick');
+  tick.restore(serialized.streams.tick);
+  const collectives = root.stream('collectives');
+  collectives.restore(serialized.streams.collectives);
+  return { root, world, agentSpawn, tick, collectives };
 }
