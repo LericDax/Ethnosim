@@ -161,6 +161,10 @@ type SnapshotResourceBundle = Record<ResourceType, number>;
 const RESOURCE_CARRY_CAPACITY = 6;
 const RESOURCE_GATHER_RATE = 1.5;
 const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
+const UNHOUSED_MOOD_KEY = 'unhoused';
+const UNHOUSED_MOOD_INCREASE_RATE = 0.12;
+const UNHOUSED_MOOD_DECAY_RATE = 0.08;
+const UNHOUSED_MOOD_MAX = 3;
 // Nodes in agent brains that actively harvest resources when present on resource tiles.
 const RESOURCE_GATHER_NODES = new Set<string>(['Gather', 'BuildDwelling']);
 
@@ -717,6 +721,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   });
   const initialAgentMap = buildAgentMap(simulation.agents);
   updateHousingQueue(simulation, initialAssignment.overflowAgents, initialAgentMap);
+  updateHousingMoods(simulation);
   if (initialAssignment.allHousesFull && initialAssignment.overflowAgents.length > 0) {
     for (const house of simulation.houses) {
       if (!house.construction.active) {
@@ -861,10 +866,9 @@ function buildBrainMultipliers(profile: ReturnType<typeof createTraitProfile>): 
 }
 
 function buildInitialMoodState(profile: ReturnType<typeof createTraitProfile>): Record<string, number> {
-  if (Object.keys(profile.moodLevels).length === 0) {
-    return {};
-  }
-  return { ...profile.moodLevels };
+  const moods: Record<string, number> = { ...profile.moodLevels };
+  moods[UNHOUSED_MOOD_KEY] = 0;
+  return moods;
 }
 
 function cloneLeadershipArray(leaders: CollectiveLeaderDescriptor[]): CollectiveLeaderDescriptor[] {
@@ -931,6 +935,7 @@ export function stepSimulationState(simulation: SimulationState): void {
   });
   const agentsById = buildAgentMap(simulation.agents);
   updateHousingQueue(simulation, assignment.overflowAgents, agentsById);
+  updateHousingMoods(simulation);
   for (const house of simulation.houses) {
     if (house.capacityPressure > 0 && !house.construction.active) {
       house.construction.active = true;
@@ -1008,6 +1013,38 @@ export function stepSimulationState(simulation: SimulationState): void {
   });
 
   simulation.stageCounts = computeStageCounts(simulation.agents);
+}
+
+function updateHousingMoods(simulation: SimulationState): void {
+  if (simulation.agents.length === 0) {
+    return;
+  }
+
+  const pending = simulation.pendingHouseAssignments.length
+    ? new Set(simulation.pendingHouseAssignments)
+    : null;
+
+  for (const agent of simulation.agents) {
+    if (!agent.moods) {
+      agent.moods = { [UNHOUSED_MOOD_KEY]: 0 };
+    } else if (!Number.isFinite(agent.moods[UNHOUSED_MOOD_KEY])) {
+      agent.moods[UNHOUSED_MOOD_KEY] = 0;
+    }
+
+    const current = Number.isFinite(agent.moods[UNHOUSED_MOOD_KEY])
+      ? agent.moods[UNHOUSED_MOOD_KEY]
+      : 0;
+    const awaitingHousing = !agent.houseId || (pending ? pending.has(agent.id) : false);
+
+    let next = current;
+    if (awaitingHousing) {
+      next = Math.min(UNHOUSED_MOOD_MAX, current + UNHOUSED_MOOD_INCREASE_RATE);
+    } else if (current > 0) {
+      next = Math.max(0, current - UNHOUSED_MOOD_DECAY_RATE);
+    }
+
+    agent.moods[UNHOUSED_MOOD_KEY] = next;
+  }
 }
 
 function processResourceEconomy(simulation: SimulationState): void {
