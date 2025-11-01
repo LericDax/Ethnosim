@@ -650,8 +650,103 @@ function ensureHarvestTarget(
     }
   }
 
+  if (bestResources <= 0) {
+    const fallback = findForestAlongDirections(world, anchor, worldRadius, stream);
+    if (fallback) {
+      best = fallback.target;
+      bestResources = fallback.resources;
+    }
+  }
+
   state.data.harvestTarget = best;
   return best;
+}
+
+interface ForestTargetCandidate {
+  target: MovementTarget;
+  resources: number;
+}
+
+function findForestAlongDirections(
+  world: WorldState,
+  anchor: MovementTarget,
+  maxDistance: number,
+  stream: RngStream,
+): ForestTargetCandidate | null {
+  const directions = buildForestSearchDirections(world, anchor, stream);
+  let best: ForestTargetCandidate | null = null;
+
+  for (const direction of directions) {
+    const target = traceForestAlongDirection(world, anchor, direction, maxDistance);
+    if (!target) {
+      continue;
+    }
+    const resources = getForestResourceAt(world, target.x, target.y);
+    if (!best || resources > best.resources) {
+      best = { target, resources };
+    }
+    if (best && best.resources > 0.5) {
+      break;
+    }
+  }
+
+  return best;
+}
+
+function buildForestSearchDirections(
+  world: WorldState,
+  anchor: MovementTarget,
+  stream: RngStream,
+): Array<{ x: number; y: number }> {
+  const directions: Array<{ x: number; y: number }> = [];
+  const dx = anchor.x - world.centerX;
+  const dy = anchor.y - world.centerY;
+  const length = Math.hypot(dx, dy);
+
+  if (length > EPSILON) {
+    directions.push({ x: dx / length, y: dy / length });
+  }
+
+  const baseAngle = stream.nextFloat() * Math.PI * 2;
+  const steps = 6;
+  for (let i = 0; i < steps; i += 1) {
+    const angle = baseAngle + (Math.PI * 2 * i) / steps;
+    directions.push({ x: Math.cos(angle), y: Math.sin(angle) });
+  }
+
+  return directions;
+}
+
+function traceForestAlongDirection(
+  world: WorldState,
+  anchor: MovementTarget,
+  direction: { x: number; y: number },
+  maxDistance: number,
+): MovementTarget | null {
+  const norm = Math.hypot(direction.x, direction.y);
+  if (norm <= EPSILON) {
+    return null;
+  }
+  const dirX = direction.x / norm;
+  const dirY = direction.y / norm;
+  const stepSize = 0.75;
+  const steps = Math.max(1, Math.ceil(maxDistance / stepSize));
+
+  for (let step = 1; step <= steps; step += 1) {
+    const distance = step * stepSize;
+    const sampleX = anchor.x + dirX * distance;
+    const sampleY = anchor.y + dirY * distance;
+    const tileX = Math.floor(sampleX);
+    const tileY = Math.floor(sampleY);
+    if (!isWithinBounds(world, tileX, tileY)) {
+      break;
+    }
+    if (isForestTile(world, sampleX, sampleY)) {
+      return clampPosition(world, sampleX, sampleY);
+    }
+  }
+
+  return null;
 }
 
 function hasForestWithinRadius(world: WorldState, anchor: MovementTarget, radius: number): boolean {
