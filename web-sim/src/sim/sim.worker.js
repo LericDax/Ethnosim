@@ -8,6 +8,8 @@ const DEFAULT_CONFIG = {
   worldSize: [100, 100],
   adults: 6,
   ticksPerUpdate: 4,
+  randomnessMode: 'deterministic',
+  randomnessIntensity: 0,
 };
 
 const state = {
@@ -29,8 +31,56 @@ function createRng(seed) {
   };
 }
 
+function createChaoticRng() {
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const buffer = new Uint32Array(1);
+    return () => {
+      crypto.getRandomValues(buffer);
+      return buffer[0] / 0xffffffff;
+    };
+  }
+  return Math.random;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function resolveRandomnessConfig(config) {
+  const mode = config.randomnessMode === 'chaotic' ? 'chaotic' : 'deterministic';
+  let intensityRaw = undefined;
+  if (typeof config.randomnessIntensity === 'number') {
+    intensityRaw = config.randomnessIntensity;
+  } else if (typeof config.randomnessIntensity === 'string') {
+    const parsed = Number.parseFloat(config.randomnessIntensity);
+    if (Number.isFinite(parsed)) {
+      intensityRaw = parsed;
+    }
+  }
+  const intensityDefault = mode === 'chaotic' ? 1 : 0;
+  const intensity = clamp(
+    Number.isFinite(intensityRaw) ? intensityRaw : intensityDefault,
+    0,
+    1
+  );
+  return { mode, intensity };
+}
+
+function buildModeAwareRng(config) {
+  const { mode, intensity } = resolveRandomnessConfig(config);
+  const deterministic = createRng(config.seed ?? DEFAULT_CONFIG.seed);
+  if (mode !== 'chaotic' || intensity <= 0) {
+    return deterministic;
+  }
+  const chaotic = createChaoticRng();
+  if (intensity >= 1) {
+    return chaotic;
+  }
+  return () => deterministic() * (1 - intensity) + chaotic() * intensity;
+}
+
 function initializeAgents(config) {
-  const rng = createRng(config.seed ?? DEFAULT_CONFIG.seed);
+  const rng = buildModeAwareRng(config);
   const [width, height] = config.worldSize;
   const agents = [];
   for (let i = 0; i < config.adults; i += 1) {
@@ -123,20 +173,25 @@ function buildCity(houses, worldSize) {
 
 function publishSnapshot() {
   const { config, tick, baseAgents } = state;
+  const randomness = resolveRandomnessConfig(config);
   const agents = baseAgents.map((agent) =>
     updateAgentKinematics(agent, tick, config.worldSize)
   );
   const houses = getHouseholds(agents);
   const snapshot = {
     tick,
-    seed: config.seed,
     worldSize: config.worldSize,
     ticksPerUpdate: config.ticksPerUpdate,
     agents,
     houses,
     city: buildCity(houses, config.worldSize),
+    randomnessMode: randomness.mode,
+    randomnessIntensity: randomness.intensity,
     meta: { generatedAt: Date.now() },
   };
+  if (config.seed !== undefined) {
+    snapshot.seed = config.seed;
+  }
   postSnapshot(self, snapshot);
 }
 
@@ -159,7 +214,19 @@ function stopLoop() {
 }
 
 onInit(self, (payload) => {
-  state.config = { ...DEFAULT_CONFIG, ...payload };
+  const merged = { ...DEFAULT_CONFIG, ...payload };
+  if (
+    (payload.randomnessMode === 'chaotic' || merged.randomnessMode === 'chaotic') &&
+    !Object.prototype.hasOwnProperty.call(payload, 'seed')
+  ) {
+    delete merged.seed;
+  }
+  const randomness = resolveRandomnessConfig(merged);
+  state.config = {
+    ...merged,
+    randomnessMode: randomness.mode,
+    randomnessIntensity: randomness.intensity,
+  };
   state.tick = 0;
   state.baseAgents = initializeAgents(state.config);
   publishSnapshot();

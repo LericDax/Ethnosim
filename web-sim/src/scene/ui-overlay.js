@@ -23,8 +23,25 @@ export function createOverlayCanvas(container) {
     context.font = '12px sans-serif';
     context.textAlign = 'left';
     context.textBaseline = 'top';
+    let offsetY = 12;
     if (typeof snapshot.tick === 'number') {
-      context.fillText(`Tick ${snapshot.tick}`, 12, 12);
+      context.fillText(`Tick ${snapshot.tick}`, 12, offsetY);
+      offsetY += 16;
+    }
+    if (snapshot.randomnessMode) {
+      const intensity =
+        typeof snapshot.randomnessIntensity === 'number'
+          ? snapshot.randomnessIntensity.toFixed(2)
+          : '—';
+      context.fillText(
+        `Randomness: ${snapshot.randomnessMode} (temp ${intensity})`,
+        12,
+        offsetY
+      );
+      offsetY += 16;
+    }
+    if (snapshot.seed !== undefined && snapshot.seed !== null) {
+      context.fillText(`Seed: ${snapshot.seed}`, 12, offsetY);
     }
   };
 
