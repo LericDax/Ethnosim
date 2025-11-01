@@ -161,7 +161,8 @@ type SnapshotResourceBundle = Record<ResourceType, number>;
 const RESOURCE_CARRY_CAPACITY = 6;
 const RESOURCE_GATHER_RATE = 1.5;
 const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
-const RESOURCE_GATHER_NODES = new Set<string>(['AccumulateStock', 'BuildDwelling']);
+// Nodes in agent brains that actively harvest resources when present on resource tiles.
+const RESOURCE_GATHER_NODES = new Set<string>(['Gather', 'BuildDwelling']);
 
 const MAX_SNAPSHOT_PULSES = 32;
 const MAX_SNAPSHOT_FILL_NODES = 32;
