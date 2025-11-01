@@ -128,6 +128,17 @@ export const JUMP_EDGE_DEFINITIONS: JumpEdgeDefinition[] = [
     activationChance: 0.75,
     requiredTraits: ['steadfast'],
   },
+  {
+    id: 'housing-urgency',
+    sourceNodes: ['Rest', 'Stockpile'],
+    targetNodeId: 'BuildDwelling',
+    moodTrigger: 'unhoused',
+    activationThreshold: 0.6,
+    releaseThreshold: 0.2,
+    cooldownTicks: 12,
+    weight: 1.2,
+    activationChance: 0.9,
+  },
 ];
 
 export function createTraitProfile(temperament: Temperament): TraitProfile {

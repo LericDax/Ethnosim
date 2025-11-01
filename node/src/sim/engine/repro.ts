@@ -336,10 +336,9 @@ function buildBrainMultipliersFromProfile(
 function buildInitialMoodStateFromProfile(
   profile: ReturnType<typeof createTraitProfile>,
 ): Record<string, number> {
-  if (Object.keys(profile.moodLevels).length === 0) {
-    return {};
-  }
-  return { ...profile.moodLevels };
+  const moods: Record<string, number> = { ...profile.moodLevels };
+  moods.unhoused = 0;
+  return moods;
 }
 
 function isMemberCompatible(agent: AgentState, role: string): boolean {
