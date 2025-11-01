@@ -106,12 +106,27 @@ export function onControl(port, callback) {
  */
 export function sendInit(worker, payload = {}) {
   const message = { type: MESSAGE_TYPES.INIT, ...payload };
-  if ('seed' in message) {
+  const randomnessMode =
+    typeof message.randomnessMode === 'string'
+      ? message.randomnessMode
+      : undefined;
+
+  if (randomnessMode === 'chaotic') {
+    if (message.seed === undefined || message.seed === null || message.seed === '') {
+      delete message.seed;
+    } else {
+      const normalized = normalizeSeed(message.seed);
+      if (normalized !== undefined) {
+        message.seed = normalized;
+      }
+    }
+  } else if ('seed' in message) {
     const normalized = normalizeSeed(message.seed);
     if (normalized !== undefined) {
       message.seed = normalized;
     }
   }
+
   worker.postMessage(message);
 }
 

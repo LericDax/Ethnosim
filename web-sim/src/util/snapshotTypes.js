@@ -58,12 +58,14 @@
 /**
  * @typedef Snapshot
  * @property {number} tick Current deterministic tick count of the simulation.
- * @property {number} seed Seed used to initialize deterministic RNG on the worker.
+ * @property {number|undefined} [seed] Seed used to initialize deterministic RNG on the worker.
  * @property {[number, number]} worldSize Width/height tuple so renderers can scale projections.
  * @property {number} ticksPerUpdate Number of internal ticks advanced between published snapshots.
  * @property {SnapshotAgent[]} agents Flat list of agents visible to the renderer.
  * @property {SnapshotHouse[]} houses Household-level overlays for UI.
  * @property {SnapshotCity|null} city Aggregate civic level state (optional).
+ * @property {('deterministic'|'chaotic')} [randomnessMode]
+ * @property {number} [randomnessIntensity]
  * @property {{ generatedAt: number }} meta Additional metadata such as timestamp (ms).
  */
 
