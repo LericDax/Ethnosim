@@ -10,6 +10,7 @@ import {
   clampPosition,
   getForestResourceAt,
   isForestTile,
+  isWithinBounds,
   type WorldState,
 } from './world.ts';
 
@@ -608,11 +609,33 @@ function ensureHarvestTarget(
 
   const anchor = getAnchorForAgent(input, context);
   const attempts = 12;
+  const world = context.world;
+  const worldRadius = Math.hypot(world.centerX, world.centerY) || 1;
+  const baseRadius = 4 + agent.explorationBias * 6;
+
+  const hasNearbyForest = hasForestWithinRadius(world, anchor, Math.max(6, baseRadius * 0.8));
+  const distanceToForestRing = hasNearbyForest
+    ? 0
+    : estimateDistanceToForestRing(world, anchor, worldRadius);
+
+  let minRadius = Math.max(3, baseRadius);
+  if (distanceToForestRing > 0) {
+    minRadius = Math.max(minRadius, distanceToForestRing + 1.5);
+  }
+  minRadius = Math.min(minRadius, worldRadius);
+
+  const worldScaleRange = Math.max(6, worldRadius * (0.12 + agent.explorationBias * 0.18));
+  const maxRadius = Math.min(worldRadius, Math.max(minRadius + 1, minRadius + worldScaleRange));
+
   let best: MovementTarget = clampPosition(context.world, anchor.x, anchor.y);
   let bestResources = 0;
 
   for (let i = 0; i < attempts; i += 1) {
-    const radius = 4 + stream.nextFloat() * (10 + agent.explorationBias * 8);
+    const radiusRange = Math.max(0, maxRadius - minRadius);
+    const radius =
+      radiusRange <= 0.5
+        ? minRadius
+        : minRadius + stream.nextFloat() * radiusRange;
     const candidate = pickRandomPointNear(anchor.x, anchor.y, radius, context.world, stream);
     if (!isForestTile(context.world, candidate.x, candidate.y)) {
       continue;
@@ -629,6 +652,63 @@ function ensureHarvestTarget(
 
   state.data.harvestTarget = best;
   return best;
+}
+
+function hasForestWithinRadius(world: WorldState, anchor: MovementTarget, radius: number): boolean {
+  const searchRadius = Math.max(0, radius);
+  const minX = Math.max(0, Math.floor(anchor.x - searchRadius));
+  const maxX = Math.min(world.width - 1, Math.ceil(anchor.x + searchRadius));
+  const minY = Math.max(0, Math.floor(anchor.y - searchRadius));
+  const maxY = Math.min(world.height - 1, Math.ceil(anchor.y + searchRadius));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (isForestTile(world, x, y)) {
+        const dx = x - anchor.x;
+        const dy = y - anchor.y;
+        if (dx * dx + dy * dy <= searchRadius * searchRadius + EPSILON) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function estimateDistanceToForestRing(
+  world: WorldState,
+  anchor: MovementTarget,
+  worldRadius: number,
+): number {
+  if (isForestTile(world, anchor.x, anchor.y)) {
+    return 0;
+  }
+
+  const dx = anchor.x - world.centerX;
+  const dy = anchor.y - world.centerY;
+  const distanceFromCenter = Math.hypot(dx, dy);
+  const baseDirectionLength = Math.hypot(dx, dy);
+  const direction =
+    baseDirectionLength > EPSILON
+      ? { x: dx / baseDirectionLength, y: dy / baseDirectionLength }
+      : { x: 1, y: 0 };
+
+  const maxSteps = Math.ceil(worldRadius);
+  for (let step = 1; step <= maxSteps; step += 1) {
+    const sampleX = anchor.x + direction.x * step;
+    const sampleY = anchor.y + direction.y * step;
+    const tileX = Math.floor(sampleX);
+    const tileY = Math.floor(sampleY);
+    if (!isWithinBounds(world, tileX, tileY)) {
+      break;
+    }
+    if (isForestTile(world, sampleX, sampleY)) {
+      return Math.hypot(sampleX - anchor.x, sampleY - anchor.y);
+    }
+  }
+
+  return Math.max(0, worldRadius - distanceFromCenter);
 }
 
 function selectSocialAnchor(
