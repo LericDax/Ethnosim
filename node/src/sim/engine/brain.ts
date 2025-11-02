@@ -272,6 +272,7 @@ export interface BrainDecisionFactor {
   moodMultiplier: number;
   personalityMultiplier: number;
   demandMultiplier: number;
+  relationshipMultiplier: number;
   totalMultiplier: number;
   attentionScore: number;
   embedding: ReadonlyArray<number>;
@@ -436,6 +437,7 @@ export interface BrainMultiplierSet {
   mood?: Record<string, number>;
   personality?: Record<string, number>;
   demand?: Record<string, number>;
+  relationship?: Record<string, number>;
 }
 
 interface BrainLibrary {
@@ -472,6 +474,7 @@ const CURRENT_NODE_CONTEXT_WEIGHT = 0.35;
 const MULTIPLIER_CONTEXT_WEIGHT_MOOD = 1;
 const MULTIPLIER_CONTEXT_WEIGHT_PERSONALITY = 0.85;
 const MULTIPLIER_CONTEXT_WEIGHT_DEMAND = 1.15;
+const MULTIPLIER_CONTEXT_WEIGHT_RELATIONSHIP = 0.95;
 const ATTENTION_GAIN = 0.75;
 const ATTENTION_BLEND = 0.6;
 const MIN_ATTENTION_SCORE = 0.05;
@@ -882,6 +885,9 @@ function createEffectiveMultipliers(
   if (multipliers.demand) {
     effective.demand = { ...multipliers.demand };
   }
+  if (multipliers.relationship) {
+    effective.relationship = { ...multipliers.relationship };
+  }
   return effective;
 }
 
@@ -906,6 +912,15 @@ function buildMultiplierEmbedding(multipliers: BrainMultiplierSet): number[] {
     const demandEmbedding = embeddingFromTagWeights(multipliers.demand, MULTIPLIER_CONTEXT_WEIGHT_DEMAND);
     if (!isZeroEmbedding(demandEmbedding)) {
       components.push(demandEmbedding);
+    }
+  }
+  if (multipliers.relationship) {
+    const relationshipEmbedding = embeddingFromTagWeights(
+      multipliers.relationship,
+      MULTIPLIER_CONTEXT_WEIGHT_RELATIONSHIP,
+    );
+    if (!isZeroEmbedding(relationshipEmbedding)) {
+      components.push(relationshipEmbedding);
     }
   }
 
@@ -1847,7 +1862,9 @@ function evaluateCandidates(
     const moodMultiplier = productForTags(targetNode.tags, multipliers.mood);
     const personalityMultiplier = productForTags(targetNode.tags, multipliers.personality);
     const demandMultiplier = productForTags(targetNode.tags, multipliers.demand);
-    const legacyMultiplier = moodMultiplier * personalityMultiplier * demandMultiplier;
+    const relationshipMultiplier = productForTags(targetNode.tags, multipliers.relationship);
+    const legacyMultiplier =
+      moodMultiplier * personalityMultiplier * demandMultiplier * relationshipMultiplier;
     const attentionModifier = computeAttentionModifier(contextEmbedding, targetNode.embedding);
     const baseMultiplier = legacyMultiplier > 0 ? legacyMultiplier : 1;
     const blendedAttention = 1 + ATTENTION_BLEND * (attentionModifier - 1);
@@ -1866,6 +1883,7 @@ function evaluateCandidates(
       moodMultiplier,
       personalityMultiplier,
       demandMultiplier,
+      relationshipMultiplier,
       totalMultiplier,
       attentionScore,
       embedding: targetNode.embedding,

@@ -24,6 +24,7 @@ import {
   cloneChromosomeRegistry,
   type ChromosomeRegistry,
 } from '../engine/chromosomes.ts';
+import type { RelationshipState } from '../engine/relationships.ts';
 
 export const DB_NAME = 'ethnosim-snapshots';
 export const STORE_NAME = 'snapshots';
@@ -61,6 +62,7 @@ export interface SerializedAgentState {
   carriedResources: AgentState['carriedResources'];
   resourceActivity: AgentState['resourceActivity'];
   movement: SerializedMovementState;
+  relationships: RelationshipState;
 }
 
 export interface SerializedMovementState {
@@ -313,6 +315,7 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     carriedResources: cloneBundle(agent.carriedResources),
     resourceActivity: cloneAgentResourceActivity(agent.resourceActivity),
     movement: serializeMovementState(agent.movement),
+    relationships: cloneRelationships(agent.relationships),
   };
 }
 
@@ -452,7 +455,41 @@ function cloneBrainMultipliers(multipliers: AgentState['brainMultipliers']): Age
   if (multipliers.demand) {
     clone.demand = { ...multipliers.demand };
   }
+  if (multipliers.relationship) {
+    clone.relationship = { ...multipliers.relationship };
+  }
   return clone;
+}
+
+function cloneRelationships(state: RelationshipState | undefined): RelationshipState {
+  const weights: RelationshipState['weights'] = {};
+  if (state?.weights) {
+    for (const [id, entry] of Object.entries(state.weights)) {
+      weights[id] = {
+        trust: Number.isFinite(entry.trust) ? entry.trust : 0,
+        rivalry: Number.isFinite(entry.rivalry) ? entry.rivalry : 0,
+        obligation: Number.isFinite(entry.obligation) ? entry.obligation : 0,
+      };
+    }
+  }
+  const events = Array.isArray(state?.events)
+    ? state.events.map((event) => ({
+        tick: event.tick ?? 0,
+        targetId: event.targetId ?? '',
+        type: event.type,
+        delta: {
+          trust: event.delta?.trust ?? 0,
+          rivalry: event.delta?.rivalry ?? 0,
+          obligation: event.delta?.obligation ?? 0,
+        },
+        note: event.note,
+      }))
+    : [];
+  return {
+    weights,
+    events,
+    lastEvaluatedTick: state?.lastEvaluatedTick ?? 0,
+  };
 }
 
 async function openDatabase(): Promise<IDBDatabase> {

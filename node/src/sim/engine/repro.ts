@@ -7,6 +7,12 @@ import { createTraitProfile } from './traits.ts';
 import { sampleChromosomes } from './chromosomes.ts';
 import { createInitialMovementState } from './move.ts';
 import { createResourceBundle } from './resources.ts';
+import {
+  createInitialRelationshipState,
+  registerPregnancyBond,
+  registerBirthBond,
+  updateRelationshipMultipliers,
+} from './relationships.ts';
 
 const CONCEPTION_RATE_MULTIPLIER = 0.02;
 export const GESTATION_TICKS = 200;
@@ -204,6 +210,7 @@ export function handleReproduction(simulation: SimulationState): void {
         fetusTemperament,
         coParentId: partner.id,
       };
+      registerPregnancyBond(agent, partner, simulation.tick);
       newPregnancies.add(agent.id);
     }
   }
@@ -220,8 +227,12 @@ export function handleReproduction(simulation: SimulationState): void {
     progressGestation(agent, simulation, rng);
 
     if (agent.pregnancy && agent.pregnancy.timeRemaining <= 0) {
+      const coParent = agent.pregnancy.coParentId
+        ? agentsById.get(agent.pregnancy.coParentId) ?? null
+        : null;
       const baby = createNewborn(simulation, agent);
       newborns.push(baby);
+      registerBirthBond(simulation, agent, coParent, baby);
       agent.pregnancy = null;
     }
   }
@@ -287,7 +298,7 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     parents.push(pregnancy.coParentId);
   }
 
-  return {
+  const baby: AgentState = {
     id,
     x: parent.x,
     y: parent.y,
@@ -318,7 +329,10 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     carriedResources: createResourceBundle(),
     resourceActivity: null,
     movement: createInitialMovementState(),
+    relationships: createInitialRelationshipState(),
   };
+  updateRelationshipMultipliers(baby);
+  return baby;
 }
 
 function buildBrainMultipliersFromProfile(
