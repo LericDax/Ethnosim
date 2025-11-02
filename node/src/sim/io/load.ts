@@ -6,8 +6,6 @@ import {
   type CityState,
   type CollectiveLeaderDescriptor,
   type HouseState,
-  type ResourceBundle,
-  type ResourceType,
   restoreHouseCapacityController,
 } from '../engine/collectives.ts';
 import { createModeAwareRngSuite, restoreModeAwareRngSuite } from '../engine/rng.ts';
@@ -17,6 +15,13 @@ import {
   cloneChromosomeRegistry,
   buildChromosomeRegistry,
 } from '../engine/chromosomes.ts';
+import {
+  RESOURCE_TYPES,
+  cloneResourceBundle as cloneBundle,
+  ensureResourceBundle,
+  type ResourceBundle,
+  type ResourceType,
+} from '../engine/resources.ts';
 import {
   DB_NAME,
   DB_VERSION,
@@ -164,17 +169,7 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
 }
 
 function restoreWorld(serialized: SerializedWorldState): WorldState {
-  const capacity = Number.isFinite(serialized.forestResourceCapacity)
-    ? serialized.forestResourceCapacity
-    : 12;
-  const totalTiles = serialized.width * serialized.height;
-  let forestResources: Float32Array;
-  if (Array.isArray(serialized.forestResources) && serialized.forestResources.length === totalTiles) {
-    forestResources = new Float32Array(serialized.forestResources);
-  } else {
-    forestResources = new Float32Array(totalTiles);
-    forestResources.fill(capacity * 0.5);
-  }
+  const tileCount = Math.max(1, serialized.width * serialized.height);
   return {
     width: serialized.width,
     height: serialized.height,
@@ -186,9 +181,113 @@ function restoreWorld(serialized: SerializedWorldState): WorldState {
       height: serialized.terrain.height,
       tiles: [...serialized.terrain.tiles],
     },
-    forestResources,
-    forestResourceCapacity: capacity,
+    resources: restoreWorldResources(serialized, tileCount),
   };
+}
+
+function restoreWorldResources(
+  serialized: SerializedWorldState,
+  tileCount: number,
+): WorldState['resources'] {
+  const stocks: Record<ResourceType, Float32Array> = {} as Record<ResourceType, Float32Array>;
+  const capacities: Record<ResourceType, Float32Array> = {} as Record<ResourceType, Float32Array>;
+  const regenRates: Record<ResourceType, Float32Array> = {} as Record<ResourceType, Float32Array>;
+  const depletion: Record<ResourceType, Float32Array> = {} as Record<ResourceType, Float32Array>;
+
+  const source = (serialized as Partial<SerializedWorldState>).resources ?? null;
+  if (source) {
+    for (const type of RESOURCE_TYPES) {
+      stocks[type] = buildFloat32Array(source.stocks?.[type], tileCount, 0, { min: 0 });
+      capacities[type] = buildFloat32Array(source.capacities?.[type], tileCount, 0, { min: 0 });
+      regenRates[type] = buildFloat32Array(source.regenRates?.[type], tileCount, 0, { min: 0 });
+      depletion[type] = buildFloat32Array(source.depletion?.[type], tileCount, 0, { min: 0, max: 1 });
+      reconcileStockCapacity(stocks[type], capacities[type]);
+    }
+  } else {
+    const legacyCapacity = Number.isFinite(serialized.forestResourceCapacity)
+      ? Math.max(0, serialized.forestResourceCapacity ?? 0)
+      : 12;
+    const legacyStocks = buildFloat32Array(serialized.forestResources, tileCount, legacyCapacity * 0.5, { min: 0 });
+    const legacyCapacities = new Float32Array(tileCount);
+    legacyCapacities.fill(legacyCapacity);
+    const legacyRegen = new Float32Array(tileCount);
+    legacyRegen.fill(Math.max(0.05, legacyCapacity * 0.05));
+    const legacyDepletion = new Float32Array(tileCount);
+
+    stocks.wood = legacyStocks;
+    capacities.wood = legacyCapacities;
+    regenRates.wood = legacyRegen;
+    depletion.wood = legacyDepletion;
+    reconcileStockCapacity(stocks.wood, capacities.wood);
+  }
+
+  for (const type of RESOURCE_TYPES) {
+    if (!stocks[type]) {
+      stocks[type] = new Float32Array(tileCount);
+    }
+    if (!capacities[type]) {
+      capacities[type] = new Float32Array(tileCount);
+    }
+    if (!regenRates[type]) {
+      regenRates[type] = new Float32Array(tileCount);
+    }
+    if (!depletion[type]) {
+      depletion[type] = new Float32Array(tileCount);
+    }
+  }
+
+  return { stocks, capacities, regenRates, depletion };
+}
+
+function buildFloat32Array(
+  source: unknown,
+  tileCount: number,
+  fillValue: number,
+  limits: { min?: number; max?: number },
+): Float32Array {
+  const array = new Float32Array(tileCount);
+  if (fillValue !== 0) {
+    array.fill(fillValue);
+  }
+
+  const values: unknown[] | Float32Array =
+    source instanceof Float32Array
+      ? source
+      : Array.isArray(source)
+        ? source
+        : [];
+
+  const length = Math.min(tileCount, (values as { length: number }).length ?? 0);
+  for (let i = 0; i < length; i += 1) {
+    const raw = Number((values as ArrayLike<number>)[i]);
+    if (!Number.isFinite(raw)) {
+      continue;
+    }
+    let value = raw;
+    if (typeof limits.min === 'number') {
+      value = Math.max(limits.min, value);
+    }
+    if (typeof limits.max === 'number') {
+      value = Math.min(limits.max, value);
+    }
+    array[i] = value;
+  }
+
+  return array;
+}
+
+function reconcileStockCapacity(stocks: Float32Array, capacities: Float32Array): void {
+  const length = Math.min(stocks.length, capacities.length);
+  for (let i = 0; i < length; i += 1) {
+    const capacity = capacities[i];
+    if (capacity <= 0) {
+      stocks[i] = 0;
+      continue;
+    }
+    if (stocks[i] > capacity) {
+      stocks[i] = capacity;
+    }
+  }
 }
 
 function sanitizePendingAssignments(source: unknown): string[] {
@@ -260,7 +359,7 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     traitFlags: [...serialized.traitFlags],
     moods: { ...serialized.moods },
     houseId: serialized.houseId,
-    carriedResources: cloneResourceBundle(serialized.carriedResources),
+    carriedResources: ensureResourceBundle(cloneBundle(serialized.carriedResources)),
     resourceActivity: cloneAgentResourceActivity(serialized.resourceActivity),
     movement: restoreMovementState(serialized.movement),
   };
@@ -360,7 +459,8 @@ function restoreHouse(serialized: SerializedHouseState): HouseState {
     brainDecision: cloneBrainDecision(serialized.brainDecision),
     members: [...serialized.members],
     activeDemand: { ...serialized.activeDemand },
-    stockpiles: cloneResourceBundle(serialized.stockpiles),
+    stockpiles: ensureResourceBundle(cloneBundle(serialized.stockpiles)),
+    resourceNeeds: ensureResourceBundle(cloneBundle((serialized as { resourceNeeds?: ResourceBundle }).resourceNeeds)),
     construction: restoreHouseConstruction(serialized.construction),
     primaryLeaderId: serialized.primaryLeaderId ?? null,
     leaders: cloneLeadershipDescriptors(serialized.leaders),
@@ -379,26 +479,12 @@ function restoreCity(serialized: SerializedCityState): CityState {
     brainDecision: cloneBrainDecision(serialized.brainDecision),
     activeDemand: { ...serialized.activeDemand },
     demandExpiresAt: serialized.demandExpiresAt,
-    stockpiles: cloneResourceBundle(serialized.stockpiles),
+    stockpiles: ensureResourceBundle(cloneBundle(serialized.stockpiles)),
+    resourceNeeds: ensureResourceBundle(cloneBundle((serialized as { resourceNeeds?: ResourceBundle }).resourceNeeds)),
     primaryLeaderId: serialized.primaryLeaderId ?? null,
     leaders: cloneLeadershipDescriptors(serialized.leaders),
     leaderDirectives: cloneDirectiveMap(serialized.leaderDirectives),
   };
-}
-
-function cloneResourceBundle(bundle: ResourceBundle | null | undefined): ResourceBundle {
-  const clone: ResourceBundle = {};
-  if (!bundle) {
-    return clone;
-  }
-  for (const [key, value] of Object.entries(bundle)) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
-      continue;
-    }
-    clone[key as ResourceType] = Math.max(0, numeric);
-  }
-  return clone;
 }
 
 function cloneLeadershipDescriptors(
@@ -460,10 +546,10 @@ function cloneAgentResourceActivity(
   if (!activity) {
     return null;
   }
-  const harvested = activity.harvested ? cloneResourceBundle(activity.harvested) : undefined;
-  const delivered = activity.delivered ? cloneResourceBundle(activity.delivered) : undefined;
-  const hasHarvested = harvested && Object.keys(harvested).length > 0;
-  const hasDelivered = delivered && Object.keys(delivered).length > 0;
+  const harvested = activity.harvested ? cloneBundle(activity.harvested) : undefined;
+  const delivered = activity.delivered ? cloneBundle(activity.delivered) : undefined;
+  const hasHarvested = harvested ? RESOURCE_TYPES.some((type) => harvested[type] > 0) : false;
+  const hasDelivered = delivered ? RESOURCE_TYPES.some((type) => delivered[type] > 0) : false;
   if (!hasHarvested && !hasDelivered) {
     return null;
   }

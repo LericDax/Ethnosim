@@ -11,11 +11,14 @@ import {
   type CityState,
   type CollectiveLeaderDescriptor,
   type HouseState,
-  type ResourceBundle,
-  type ResourceType,
   serializeHouseCapacityController,
   type SerializedHouseCapacityController,
 } from '../engine/collectives.ts';
+import {
+  RESOURCE_TYPES,
+  cloneResourceBundle as cloneBundle,
+  type ResourceType,
+} from '../engine/resources.ts';
 import {
   cloneAgentChromosomes,
   cloneChromosomeRegistry,
@@ -94,6 +97,7 @@ export interface SerializedHouseState {
   members: string[];
   activeDemand: Record<string, number>;
   stockpiles: HouseState['stockpiles'];
+  resourceNeeds?: HouseState['resourceNeeds'];
   construction: HouseState['construction'];
   primaryLeaderId: string | null;
   leaders: CollectiveLeaderDescriptor[];
@@ -111,6 +115,7 @@ export interface SerializedCityState {
   activeDemand: Record<string, number>;
   demandExpiresAt: number;
   stockpiles: CityState['stockpiles'];
+  resourceNeeds?: CityState['resourceNeeds'];
   primaryLeaderId: string | null;
   leaders: CollectiveLeaderDescriptor[];
   leaderDirectives: Record<string, number>;
@@ -122,6 +127,13 @@ export interface SerializedTerrainLayer {
   tiles: WorldState['terrain']['tiles'];
 }
 
+export interface SerializedWorldResources {
+  stocks: Record<ResourceType, number[]>;
+  capacities: Record<ResourceType, number[]>;
+  regenRates: Record<ResourceType, number[]>;
+  depletion: Record<ResourceType, number[]>;
+}
+
 export interface SerializedWorldState {
   width: number;
   height: number;
@@ -129,8 +141,11 @@ export interface SerializedWorldState {
   centerY: number;
   climateSeed: number;
   terrain: SerializedTerrainLayer;
-  forestResources: number[];
-  forestResourceCapacity: number;
+  resources: SerializedWorldResources;
+  /** @deprecated retained for backward compatibility */
+  forestResources?: number[];
+  /** @deprecated retained for backward compatibility */
+  forestResourceCapacity?: number;
 }
 
 export interface SerializedSimulationRng {
@@ -245,9 +260,24 @@ function serializeWorld(world: WorldState): SerializedWorldState {
       height: world.terrain.height,
       tiles: [...world.terrain.tiles],
     },
-    forestResources: Array.from(world.forestResources),
-    forestResourceCapacity: world.forestResourceCapacity,
+    resources: serializeWorldResources(world.resources),
   };
+}
+
+function serializeWorldResources(layers: WorldState['resources']): SerializedWorldResources {
+  const stocks: SerializedWorldResources['stocks'] = {} as SerializedWorldResources['stocks'];
+  const capacities: SerializedWorldResources['capacities'] = {} as SerializedWorldResources['capacities'];
+  const regenRates: SerializedWorldResources['regenRates'] = {} as SerializedWorldResources['regenRates'];
+  const depletion: SerializedWorldResources['depletion'] = {} as SerializedWorldResources['depletion'];
+
+  for (const type of RESOURCE_TYPES) {
+    stocks[type] = Array.from(layers.stocks[type]);
+    capacities[type] = Array.from(layers.capacities[type]);
+    regenRates[type] = Array.from(layers.regenRates[type]);
+    depletion[type] = Array.from(layers.depletion[type]);
+  }
+
+  return { stocks, capacities, regenRates, depletion };
 }
 
 function serializeAgent(agent: AgentState): SerializedAgentState {
@@ -279,7 +309,7 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     traitFlags: [...agent.traitFlags],
     moods: { ...agent.moods },
     houseId: agent.houseId ?? null,
-    carriedResources: cloneResourceBundle(agent.carriedResources),
+    carriedResources: cloneBundle(agent.carriedResources),
     resourceActivity: cloneAgentResourceActivity(agent.resourceActivity),
     movement: serializeMovementState(agent.movement),
   };
@@ -323,7 +353,8 @@ function serializeHouse(house: HouseState): SerializedHouseState {
     brainDecision: cloneBrainDecision(house.brainDecision),
     members: [...house.members],
     activeDemand: { ...house.activeDemand },
-    stockpiles: cloneResourceBundle(house.stockpiles),
+    stockpiles: cloneBundle(house.stockpiles),
+    resourceNeeds: cloneBundle(house.resourceNeeds),
     construction: {
       active: Boolean(house.construction?.active),
       progress: house.construction?.progress ?? 0,
@@ -347,7 +378,8 @@ function serializeCity(city: CityState): SerializedCityState {
     brainDecision: cloneBrainDecision(city.brainDecision),
     activeDemand: { ...city.activeDemand },
     demandExpiresAt: city.demandExpiresAt,
-    stockpiles: cloneResourceBundle(city.stockpiles),
+    stockpiles: cloneBundle(city.stockpiles),
+    resourceNeeds: cloneBundle(city.resourceNeeds),
     primaryLeaderId: city.primaryLeaderId,
     leaders: city.leaders.map((leader) => cloneLeaderDescriptor(leader)),
     leaderDirectives: { ...city.leaderDirectives },
@@ -370,21 +402,6 @@ function serializeLeadership(source: SimulationState['leadership']): SerializedL
   };
 }
 
-function cloneResourceBundle(bundle: ResourceBundle | null | undefined): ResourceBundle {
-  const clone: ResourceBundle = {};
-  if (!bundle) {
-    return clone;
-  }
-  for (const [key, value] of Object.entries(bundle)) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
-      continue;
-    }
-    clone[key as ResourceType] = Math.max(0, numeric);
-  }
-  return clone;
-}
-
 function cloneAgentResourceActivity(
   activity: AgentState['resourceActivity'],
 ): AgentState['resourceActivity'] {
@@ -392,10 +409,10 @@ function cloneAgentResourceActivity(
     return null;
   }
 
-  const harvested = activity.harvested ? cloneResourceBundle(activity.harvested) : undefined;
-  const delivered = activity.delivered ? cloneResourceBundle(activity.delivered) : undefined;
-  const hasHarvested = harvested && Object.keys(harvested).length > 0;
-  const hasDelivered = delivered && Object.keys(delivered).length > 0;
+  const harvested = activity.harvested ? cloneBundle(activity.harvested) : undefined;
+  const delivered = activity.delivered ? cloneBundle(activity.delivered) : undefined;
+  const hasHarvested = harvested ? RESOURCE_TYPES.some((type) => harvested[type] > 0) : false;
+  const hasDelivered = delivered ? RESOURCE_TYPES.some((type) => delivered[type] > 0) : false;
 
   if (!hasHarvested && !hasDelivered) {
     return null;

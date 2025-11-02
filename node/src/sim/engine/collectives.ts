@@ -8,6 +8,17 @@ import {
 import type { BrainMultiplierSet } from './brain.ts';
 import type { RngStream } from './rng.ts';
 import type { ScenarioHousingConfig, ScenarioHousingProfile } from '../../../../shared/types.ts';
+import {
+  RESOURCE_TYPES,
+  createResourceBundle,
+  ensureResourceBundle,
+  getResourceAmount,
+  type ResourceBundle,
+  type ResourceType,
+} from './resources.ts';
+
+export type { ResourceBundle, ResourceType } from './resources.ts';
+export { RESOURCE_TYPES } from './resources.ts';
 
 const HOUSE_MIND_ID = 'HouseMind_v1';
 const HOUSE_NODE_DURATION = 12;
@@ -319,10 +330,6 @@ export function resolveHouseCapacity(
   return computeCapacityFromRule(effectiveRule, radius);
 }
 
-export type ResourceType = 'wood';
-
-export type ResourceBundle = Partial<Record<ResourceType, number>>;
-
 export interface HouseConstructionState {
   active: boolean;
   progress: number;
@@ -366,6 +373,7 @@ interface LeadershipSelectionContext {
 interface HouseDemandTemplate {
   nodeId: string;
   tagMultipliers: Record<string, number>;
+  resourceBias?: Partial<Record<ResourceType, number>>;
 }
 
 const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
@@ -376,6 +384,7 @@ const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
       defense: 1.2,
       build: 1.1,
     },
+    resourceBias: { wood: 1.2, ore: 0.3 },
   },
   ProtectYoung: {
     nodeId: 'ProtectYoung',
@@ -384,6 +393,7 @@ const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
       defense: 1.15,
       safety: 1.35,
     },
+    resourceBias: { forage: 1.1, wood: 0.4 },
   },
   NurtureHeir: {
     nodeId: 'NurtureHeir',
@@ -392,6 +402,7 @@ const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
       future: 1.3,
       lineage: 1.2,
     },
+    resourceBias: { forage: 1.0, wood: 0.2 },
   },
   EnsureLineage: {
     nodeId: 'EnsureLineage',
@@ -400,6 +411,7 @@ const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
       strategy: 1.15,
       legacy: 1.25,
     },
+    resourceBias: { wood: 0.6, ore: 0.9 },
   },
   AvengeSlight: {
     nodeId: 'AvengeSlight',
@@ -408,6 +420,7 @@ const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
       honor: 1.25,
       outward: 1.2,
     },
+    resourceBias: { ore: 1.0, wood: 0.3 },
   },
   AccumulateStock: {
     nodeId: 'AccumulateStock',
@@ -416,6 +429,7 @@ const HOUSE_DEMAND_TEMPLATES: Record<string, HouseDemandTemplate> = {
       stockpile: 1.3,
       home: 1.1,
     },
+    resourceBias: { wood: 0.9, forage: 1.0, ore: 0.4 },
   },
 };
 
@@ -447,6 +461,7 @@ export interface HouseState {
   members: string[];
   activeDemand: Record<string, number>;
   stockpiles: ResourceBundle;
+  resourceNeeds: ResourceBundle;
   construction: HouseConstructionState;
   primaryLeaderId: string | null;
   leaders: CollectiveLeaderDescriptor[];
@@ -496,6 +511,7 @@ export function setHouseCapacityForArchetype(
 interface CityDemandTemplate {
   nodeId: string;
   tagMultipliers: Record<string, number>;
+  resourceBias?: Partial<Record<ResourceType, number>>;
 }
 
 const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
@@ -507,6 +523,7 @@ const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
       authority: 1.15,
       resource: 1.1,
     },
+    resourceBias: { wood: 0.8, forage: 0.6, ore: 1.0 },
   },
   MaintainOrder: {
     nodeId: 'MaintainOrder',
@@ -516,6 +533,7 @@ const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
       control: 1.2,
       discipline: 1.15,
     },
+    resourceBias: { forage: 0.5, wood: 0.4 },
   },
   ProjectDoctrine: {
     nodeId: 'ProjectDoctrine',
@@ -524,6 +542,7 @@ const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
       ideology: 1.25,
       loyalty: 1.2,
     },
+    resourceBias: { forage: 0.9, wood: 0.3 },
   },
   AbsorbYouth: {
     nodeId: 'AbsorbYouth',
@@ -533,6 +552,7 @@ const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
       youth: 1.2,
       social: 1.1,
     },
+    resourceBias: { forage: 1.1, wood: 0.3 },
   },
   SanctifyBirth: {
     nodeId: 'SanctifyBirth',
@@ -542,6 +562,7 @@ const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
       loyalty: 1.3,
       doctrine: 1.15,
     },
+    resourceBias: { forage: 1.2, wood: 0.5 },
   },
   SuppressRivals: {
     nodeId: 'SuppressRivals',
@@ -550,7 +571,14 @@ const CITY_DEMAND_TEMPLATES: Record<string, CityDemandTemplate> = {
       authority: 1.2,
       conflict: 1.15,
     },
+    resourceBias: { ore: 1.2, wood: 0.6 },
   },
+};
+
+const RESOURCE_DEMAND_TAGS: Record<ResourceType, string> = {
+  wood: 'wood',
+  forage: 'forage',
+  ore: 'ore',
 };
 
 export interface CityState {
@@ -564,6 +592,7 @@ export interface CityState {
   activeDemand: Record<string, number>;
   demandExpiresAt: number;
   stockpiles: ResourceBundle;
+  resourceNeeds: ResourceBundle;
   primaryLeaderId: string | null;
   leaders: CollectiveLeaderDescriptor[];
   leaderDirectives: Record<string, number>;
@@ -679,7 +708,8 @@ export function createHouseState(
     brainDecision: null,
     members: [],
     activeDemand: {},
-    stockpiles: { wood: 0 },
+    stockpiles: createResourceBundle(),
+    resourceNeeds: createResourceBundle(),
     construction: {
       active: false,
       progress: 0,
@@ -718,7 +748,8 @@ export function createUrbanCenter(options: CitySpawnOptions): CityState {
     brainDecision: null,
     activeDemand,
     demandExpiresAt: duration,
-    stockpiles: { wood: 0 },
+    stockpiles: createResourceBundle(),
+    resourceNeeds: createResourceBundle(),
     primaryLeaderId: null,
     leaders: [],
     leaderDirectives: {},
@@ -831,6 +862,7 @@ export function updateCollectiveDemands(
       rng: options.rng ?? null,
     });
     runCityScheduler(city, { currentTick, rng: options.rng ?? null });
+    applyCityResourceDemand(city);
     if (city.activeDemand && Object.keys(city.activeDemand).length > 0 && currentTick <= city.demandExpiresAt) {
       const radiusSq = city.radius * city.radius;
       for (const agent of agents) {
@@ -853,7 +885,7 @@ export function updateCollectiveDemands(
 
   for (const house of houses) {
     runHouseScheduler(house, { currentTick, rng: options.rng ?? null });
-    applyHouseWoodDemand(house, pendingAssignments);
+    applyHouseResourceDemand(house, pendingAssignments);
     if (house.members.length === 0) {
       continue;
     }
@@ -872,44 +904,6 @@ export function updateCollectiveDemands(
       applyDemandMultipliers(demand, house.leaderDirectives);
     }
   }
-}
-
-function applyHouseWoodDemand(house: HouseState, pendingAssignments: number): void {
-  const multiplier = calculateWoodDemandMultiplier(house, pendingAssignments);
-  if (multiplier > 0) {
-    house.activeDemand.wood = multiplier;
-  } else {
-    delete house.activeDemand.wood;
-  }
-}
-
-function calculateWoodDemandMultiplier(house: HouseState, pendingAssignments: number): number {
-  let intensity = 0;
-
-  const capacityPressure = Math.max(0, house.capacityPressure);
-  if (capacityPressure > 0) {
-    const cappedPressure = Math.min(capacityPressure, 6);
-    intensity += 0.35 + cappedPressure * 0.3;
-  }
-
-  if (house.construction.active) {
-    const required = Math.max(1, house.construction.required);
-    const remaining = Math.max(0, house.construction.required - house.construction.progress);
-    const normalized = remaining / required;
-    intensity += 0.75 + normalized * 0.85;
-  }
-
-  const backlog = Math.max(0, Math.min(pendingAssignments, 12));
-  if (backlog > 0) {
-    intensity += backlog * 0.12;
-  }
-
-  if (intensity <= 0) {
-    return 0;
-  }
-
-  const cappedIntensity = Math.min(intensity, 3);
-  return 1 + cappedIntensity;
 }
 
 interface LeadershipCandidateEvaluation {
@@ -1340,6 +1334,96 @@ function clamp(value: number, min: number, max: number): number {
 function cloneCityDemand(nodeId: string): Record<string, number> {
   const template = CITY_DEMAND_TEMPLATES[nodeId];
   return template ? { ...template.tagMultipliers } : {};
+}
+
+
+function getResourceDemandTag(type: ResourceType): string {
+  return RESOURCE_DEMAND_TAGS[type] ?? 'resource';
+}
+
+function applyHouseResourceDemand(house: HouseState, pendingAssignments: number): void {
+  house.stockpiles = ensureResourceBundle(house.stockpiles);
+  const needs = computeHouseResourceNeeds(house, pendingAssignments);
+  house.resourceNeeds = needs;
+
+  const totalNeed = RESOURCE_TYPES.reduce((sum, type) => sum + (needs[type] ?? 0), 0);
+  for (const type of RESOURCE_TYPES) {
+    const tag = getResourceDemandTag(type);
+    const intensity = needs[type] ?? 0;
+    if (intensity > 0.05) {
+      house.activeDemand[tag] = 1 + intensity * 1.35;
+    } else {
+      delete house.activeDemand[tag];
+    }
+  }
+  if (totalNeed > 0.12) {
+    house.activeDemand.resource = 1 + totalNeed * 0.35;
+  } else {
+    delete house.activeDemand.resource;
+  }
+}
+
+function computeHouseResourceNeeds(house: HouseState, pendingAssignments: number): ResourceBundle {
+  const template = HOUSE_DEMAND_TEMPLATES[house.brain.currentNodeId] ?? null;
+  const bias = template?.resourceBias ?? {};
+  const stock = ensureResourceBundle(house.stockpiles);
+  const members = Math.max(1, house.members.length);
+  const pressure = Math.max(0, house.capacityPressure);
+  const constructionProgress = house.construction?.active
+    ? Math.max(0, house.construction.required - house.construction.progress) / Math.max(1, house.construction.required)
+    : 0;
+
+  const needs = createResourceBundle();
+  const woodTarget = 6 + members * 3 + constructionProgress * 14 + pressure * 2 + pendingAssignments * 1.5 + (bias.wood ?? 0) * 4;
+  const forageTarget = 4 + members * 2.3 + (bias.forage ?? 0) * 3;
+  const oreTarget = 1 + members * 0.5 + constructionProgress * 1.5 + (bias.ore ?? 0) * 2;
+
+  needs.wood = Math.max(0, (woodTarget - getResourceAmount(stock, 'wood')) / Math.max(1, woodTarget));
+  needs.forage = Math.max(0, (forageTarget - getResourceAmount(stock, 'forage')) / Math.max(1, forageTarget));
+  needs.ore = Math.max(0, (oreTarget - getResourceAmount(stock, 'ore')) / Math.max(1, oreTarget));
+
+  return needs;
+}
+
+function applyCityResourceDemand(city: CityState): void {
+  city.stockpiles = ensureResourceBundle(city.stockpiles);
+  const needs = computeCityResourceNeeds(city);
+  city.resourceNeeds = needs;
+
+  const totalNeed = RESOURCE_TYPES.reduce((sum, type) => sum + (needs[type] ?? 0), 0);
+  for (const type of RESOURCE_TYPES) {
+    const tag = getResourceDemandTag(type);
+    const intensity = needs[type] ?? 0;
+    if (intensity > 0.05) {
+      city.activeDemand[tag] = 1 + intensity * 1.25;
+    } else {
+      delete city.activeDemand[tag];
+    }
+  }
+  if (totalNeed > 0.15) {
+    city.activeDemand.resource = 1 + totalNeed * 0.3;
+  } else {
+    delete city.activeDemand.resource;
+  }
+}
+
+function computeCityResourceNeeds(city: CityState): ResourceBundle {
+  const template = CITY_DEMAND_TEMPLATES[city.brain.currentNodeId] ?? null;
+  const bias = template?.resourceBias ?? {};
+  const stock = ensureResourceBundle(city.stockpiles);
+  const radiusFactor = Math.max(1, city.radius);
+  const leaderCount = Array.isArray(city.leaders) ? city.leaders.length : 0;
+
+  const needs = createResourceBundle();
+  const woodTarget = 18 + radiusFactor * 0.8 + leaderCount * 1.5 + (bias?.wood ?? 0) * 6;
+  const forageTarget = 20 + radiusFactor * 1.2 + leaderCount * 2 + (bias?.forage ?? 0) * 7;
+  const oreTarget = 10 + radiusFactor * 0.5 + leaderCount * 1.2 + (bias?.ore ?? 0) * 5;
+
+  needs.wood = Math.max(0, (woodTarget - getResourceAmount(stock, 'wood')) / Math.max(1, woodTarget));
+  needs.forage = Math.max(0, (forageTarget - getResourceAmount(stock, 'forage')) / Math.max(1, forageTarget));
+  needs.ore = Math.max(0, (oreTarget - getResourceAmount(stock, 'ore')) / Math.max(1, oreTarget));
+
+  return needs;
 }
 
 function applyDemandMultipliers(

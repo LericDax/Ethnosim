@@ -18,13 +18,7 @@ import {
   type MovableAgent,
   type MovementContext,
 } from './engine/move.ts';
-import {
-  createWorld,
-  clampPosition,
-  harvestForestResource,
-  isForestTile,
-  type WorldState,
-} from './engine/world.ts';
+import { clampPosition, createWorld, harvestResource, tickWorldResources, type WorldState } from './engine/world.ts';
 import { handleReproduction, matchReproductivePartners } from './engine/repro.ts';
 import { createTraitProfile } from './engine/traits.ts';
 import {
@@ -44,12 +38,21 @@ import {
   type HouseAssignableAgent,
   type HouseState,
   type CityState,
-  type ResourceBundle,
-  type ResourceType,
   type CollectiveLeaderDescriptor,
   type HouseCapacityController,
   type HouseCapacityPatch,
 } from './engine/collectives.ts';
+import {
+  RESOURCE_TYPES,
+  addResourceAmount,
+  createResourceBundle,
+  ensureResourceBundle,
+  getResourceAmount,
+  removeResourceAmount,
+  sanitizeResourceAmount,
+  type ResourceBundle,
+  type ResourceType,
+} from './engine/resources.ts';
 import {
   stepAging,
   STAGE_BASE_SPEED,
@@ -169,7 +172,11 @@ export interface SimulationConfig {
 type SnapshotResourceBundle = Record<ResourceType, number>;
 
 const RESOURCE_CARRY_CAPACITY = 6;
-const RESOURCE_GATHER_RATE = 1.5;
+const RESOURCE_HARVEST_RATES: Record<ResourceType, number> = {
+  wood: 1.5,
+  forage: 1.1,
+  ore: 0.85,
+};
 const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
 const UNHOUSED_MOOD_KEY = 'unhoused';
 const UNHOUSED_MOOD_INCREASE_RATE = 0.12;
@@ -875,7 +882,7 @@ function createAgents(
       traitFlags: [...traitProfile.traitFlags],
       moods: buildInitialMoodState(traitProfile),
       houseId: null,
-      carriedResources: { wood: 0 },
+      carriedResources: createResourceBundle(),
       resourceActivity: null,
       movement: createInitialMovementState(),
     });
@@ -1122,16 +1129,18 @@ function updateHousingMoods(simulation: SimulationState): void {
   }
 }
 
+
 function processResourceEconomy(simulation: SimulationState): void {
+  tickWorldResources(simulation.world);
+
   if (simulation.agents.length === 0) {
     return;
   }
 
   const houseMap = new Map<string, HouseState>();
   for (const house of simulation.houses) {
-    if (!house.stockpiles) {
-      house.stockpiles = { wood: 0 };
-    }
+    house.stockpiles = ensureResourceBundle(house.stockpiles);
+    house.resourceNeeds = ensureResourceBundle(house.resourceNeeds);
     if (!house.construction) {
       house.construction = {
         active: false,
@@ -1145,17 +1154,16 @@ function processResourceEconomy(simulation: SimulationState): void {
 
   const agentMap = new Map<string, AgentState>();
   for (const agent of simulation.agents) {
-    if (!agent.carriedResources) {
-      agent.carriedResources = { wood: 0 };
-    }
+    agent.carriedResources = createResourceBundle(agent.carriedResources);
     agent.resourceActivity = null;
     agentMap.set(agent.id, agent);
   }
 
   const newHouses: HouseState[] = [];
   const city = simulation.city;
-  if (city && !city.stockpiles) {
-    city.stockpiles = { wood: 0 };
+  if (city) {
+    city.stockpiles = ensureResourceBundle(city.stockpiles);
+    city.resourceNeeds = ensureResourceBundle(city.resourceNeeds);
   }
 
   for (const agent of simulation.agents) {
@@ -1163,7 +1171,12 @@ function processResourceEconomy(simulation: SimulationState): void {
   }
 
   for (const house of simulation.houses) {
+    applyHouseResourceConsumption(house);
     maybeCompleteHouseConstruction(simulation, house, newHouses, agentMap);
+  }
+
+  if (city) {
+    applyCityResourceConsumption(city);
   }
 
   if (newHouses.length > 0) {
@@ -1182,43 +1195,127 @@ function handleAgentResourceActions(
 ): void {
   const nodeId = agent.brain.currentNodeId;
   const canGather = RESOURCE_GATHER_NODES.has(nodeId);
+  const house = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
+  const focusType = determineAgentResourceFocus(agent, house, city);
 
-  if (canGather && isForestTile(simulation.world, agent.x, agent.y)) {
-    const carriedWood = sanitizeResourceValue(agent.carriedResources.wood);
-    const capacity = Math.max(0, RESOURCE_CARRY_CAPACITY - carriedWood);
+  if (canGather && focusType) {
+    const carriedTotal = getTotalResourceAmount(agent.carriedResources);
+    const capacity = Math.max(0, RESOURCE_CARRY_CAPACITY - carriedTotal);
     if (capacity > 0) {
-      const harvested = harvestForestResource(
+      const rate = RESOURCE_HARVEST_RATES[focusType] ?? 1;
+      const harvested = harvestResource(
         simulation.world,
+        focusType,
         agent.x,
         agent.y,
-        Math.min(capacity, RESOURCE_GATHER_RATE),
+        Math.min(capacity, rate),
       );
       if (harvested > 0) {
-        agent.carriedResources.wood = carriedWood + harvested;
-        recordAgentResourceActivity(agent, 'harvested', 'wood', harvested);
+        addResourceAmount(agent.carriedResources, focusType, harvested);
+        recordAgentResourceActivity(agent, 'harvested', focusType, harvested);
       }
     }
   }
 
-  const carried = sanitizeResourceValue(agent.carriedResources.wood);
-  if (!canGather || carried <= 0) {
+  const totalCarried = getTotalResourceAmount(agent.carriedResources);
+  if (totalCarried <= 0) {
     return;
   }
 
-  let delivered = 0;
-  const house = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
-  if (house && canDeliverToHouse(agent, house)) {
-    delivered = carried;
-    applyHouseDelivery(house, delivered);
-  } else if (city && canDeliverToCity(agent, city)) {
-    delivered = carried;
-    applyCityDelivery(city, delivered);
+  const inDeliveryPhase = isMovementInDeliveryPhase(agent);
+  const shouldDeliver = !canGather || inDeliveryPhase || totalCarried >= RESOURCE_CARRY_CAPACITY * 0.6;
+  if (!shouldDeliver) {
+    return;
   }
 
-  if (delivered > 0) {
-    agent.carriedResources.wood = Math.max(0, carried - delivered);
-    recordAgentResourceActivity(agent, 'delivered', 'wood', delivered);
+  if (house && canDeliverToHouse(agent, house)) {
+    let delivered = false;
+    for (const type of RESOURCE_TYPES) {
+      const available = getResourceAmount(agent.carriedResources, type);
+      if (available <= 0) {
+        continue;
+      }
+      const removed = removeResourceAmount(agent.carriedResources, type, available);
+      if (removed > 0) {
+        applyHouseDelivery(house, type, removed);
+        recordAgentResourceActivity(agent, 'delivered', type, removed);
+        delivered = true;
+      }
+    }
+    if (delivered) {
+      return;
+    }
   }
+
+  if (city && canDeliverToCity(agent, city)) {
+    let delivered = false;
+    for (const type of RESOURCE_TYPES) {
+      const available = getResourceAmount(agent.carriedResources, type);
+      if (available <= 0) {
+        continue;
+      }
+      const removed = removeResourceAmount(agent.carriedResources, type, available);
+      if (removed > 0) {
+        applyCityDelivery(city, type, removed);
+        recordAgentResourceActivity(agent, 'delivered', type, removed);
+        delivered = true;
+      }
+    }
+    if (delivered) {
+      return;
+    }
+  }
+}
+
+function applyHouseDelivery(house: HouseState, resource: ResourceType, amount: number): void {
+  if (amount <= 0) {
+    return;
+  }
+  house.stockpiles = ensureResourceBundle(house.stockpiles);
+  addResourceAmount(house.stockpiles, resource, amount);
+
+  if (resource === 'wood' && house.construction) {
+    if (!house.construction.active) {
+      house.construction.active = true;
+    }
+    if (house.construction.active) {
+      house.construction.progress = Math.min(
+        house.construction.required,
+        house.construction.progress + amount,
+      );
+    }
+  }
+}
+
+function applyCityDelivery(city: CityState, resource: ResourceType, amount: number): void {
+  if (amount <= 0) {
+    return;
+  }
+  city.stockpiles = ensureResourceBundle(city.stockpiles);
+  addResourceAmount(city.stockpiles, resource, amount);
+}
+
+
+function applyHouseResourceConsumption(house: HouseState): void {
+  house.stockpiles = ensureResourceBundle(house.stockpiles);
+  const members = Math.max(1, house.members.length);
+  const woodUse = 0.12 + members * 0.08;
+  const forageUse = 0.22 + members * 0.24;
+  const oreDecay = 0.04 + members * 0.02;
+  removeResourceAmount(house.stockpiles, 'wood', woodUse);
+  removeResourceAmount(house.stockpiles, 'forage', forageUse);
+  removeResourceAmount(house.stockpiles, 'ore', oreDecay);
+}
+
+function applyCityResourceConsumption(city: CityState): void {
+  city.stockpiles = ensureResourceBundle(city.stockpiles);
+  const leaderCount = Array.isArray(city.leaders) ? city.leaders.length : 0;
+  const woodUse = 0.6 + leaderCount * 0.08;
+  const forageUse = 0.8 + leaderCount * 0.12;
+  const oreUse = 0.3 + leaderCount * 0.05;
+  removeResourceAmount(city.stockpiles, 'wood', woodUse);
+  removeResourceAmount(city.stockpiles, 'forage', forageUse);
+  removeResourceAmount(city.stockpiles, 'ore', oreUse);
 }
 
 function canDeliverToHouse(agent: AgentState, house: HouseState): boolean {
@@ -1235,36 +1332,6 @@ function canDeliverToCity(agent: AgentState, city: CityState): boolean {
   return dx * dx + dy * dy <= reach * reach;
 }
 
-function applyHouseDelivery(house: HouseState, amount: number): void {
-  if (amount <= 0) {
-    return;
-  }
-  if (!house.stockpiles) {
-    house.stockpiles = { wood: 0 };
-  }
-  const current = sanitizeResourceValue(house.stockpiles.wood);
-  house.stockpiles.wood = current + amount;
-  if (!house.construction.active) {
-    house.construction.active = true;
-  }
-  if (house.construction.active) {
-    house.construction.progress = Math.min(
-      house.construction.required,
-      house.construction.progress + amount,
-    );
-  }
-}
-
-function applyCityDelivery(city: CityState, amount: number): void {
-  if (amount <= 0) {
-    return;
-  }
-  if (!city.stockpiles) {
-    city.stockpiles = { wood: 0 };
-  }
-  const current = sanitizeResourceValue(city.stockpiles.wood);
-  city.stockpiles.wood = current + amount;
-}
 
 function recordAgentResourceActivity(
   agent: AgentState,
@@ -1280,11 +1347,103 @@ function recordAgentResourceActivity(
   }
   if (type === 'harvested') {
     const bucket = agent.resourceActivity.harvested ?? (agent.resourceActivity.harvested = {});
-    bucket[resource] = sanitizeResourceValue(bucket[resource]) + amount;
+    bucket[resource] = sanitizeResourceAmount(bucket[resource]) + amount;
   } else {
     const bucket = agent.resourceActivity.delivered ?? (agent.resourceActivity.delivered = {});
-    bucket[resource] = sanitizeResourceValue(bucket[resource]) + amount;
+    bucket[resource] = sanitizeResourceAmount(bucket[resource]) + amount;
   }
+}
+
+function determineAgentResourceFocus(
+  agent: AgentState,
+  house: HouseState | null,
+  city: CityState | null,
+): ResourceType | null {
+  const movementPreference = coerceResourceType(agent.movement?.data?.resourceType);
+  const carried = getDominantResource(agent.carriedResources);
+
+  let bestType: ResourceType | null = null;
+  let bestScore = 0;
+
+  for (const type of RESOURCE_TYPES) {
+    let score = 0;
+    if (house) {
+      score += getResourceAmount(house.resourceNeeds, type) * 1.1;
+    }
+    if (city) {
+      score += getResourceAmount(city.resourceNeeds, type) * 0.9;
+    }
+    if (carried && carried.type === type) {
+      score += carried.amount * 0.5;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestType = type;
+    }
+  }
+
+  if (movementPreference && bestScore <= 0.05) {
+    return movementPreference;
+  }
+
+  if (movementPreference && bestType === movementPreference) {
+    return movementPreference;
+  }
+
+  if (bestType && bestScore > 0.05) {
+    return bestType;
+  }
+
+  if (carried && carried.amount > 0.2) {
+    return carried.type;
+  }
+
+  return movementPreference;
+}
+
+function coerceResourceType(value: unknown): ResourceType | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  for (const type of RESOURCE_TYPES) {
+    if (type === value) {
+      return type;
+    }
+  }
+  return null;
+}
+
+function getTotalResourceAmount(bundle: ResourceBundle | null | undefined): number {
+  if (!bundle) {
+    return 0;
+  }
+  let total = 0;
+  for (const type of RESOURCE_TYPES) {
+    total += getResourceAmount(bundle, type);
+  }
+  return total;
+}
+
+function isMovementInDeliveryPhase(agent: AgentState): boolean {
+  const phase = agent.movement?.data?.phase;
+  return typeof phase === 'string' && phase === 'deliver';
+}
+
+function getDominantResource(bundle: ResourceBundle | null | undefined): { type: ResourceType; amount: number } | null {
+  if (!bundle) {
+    return null;
+  }
+  let best: { type: ResourceType; amount: number } | null = null;
+  for (const type of RESOURCE_TYPES) {
+    const amount = getResourceAmount(bundle, type);
+    if (amount <= 0) {
+      continue;
+    }
+    if (!best || amount > best.amount) {
+      best = { type, amount };
+    }
+  }
+  return best;
 }
 
 function buildAgentMap(agents: AgentState[]): Map<string, AgentState> {
@@ -1405,6 +1564,7 @@ function adjustHousingCapacity(message: WorkerAdjustHousingCapacityMessage): voi
   }
 }
 
+
 function maybeCompleteHouseConstruction(
   simulation: SimulationState,
   house: HouseState,
@@ -1415,7 +1575,7 @@ function maybeCompleteHouseConstruction(
     return;
   }
 
-  const stockpileWood = sanitizeResourceValue(house.stockpiles.wood);
+  const stockpileWood = getResourceAmount(house.stockpiles, 'wood');
   if (!house.construction.active) {
     if (stockpileWood > 0) {
       house.construction.active = true;
@@ -1443,7 +1603,7 @@ function maybeCompleteHouseConstruction(
   }
 
   const cost = HOUSE_CONSTRUCTION_COST;
-  house.stockpiles.wood = Math.max(0, stockpileWood - cost);
+  removeResourceAmount(house.stockpiles, 'wood', cost);
   house.construction.progress = 0;
   house.construction.active = false;
   house.construction.cooldownUntil = simulation.tick + HOUSE_CONSTRUCTION_COOLDOWN;
@@ -1452,9 +1612,12 @@ function maybeCompleteHouseConstruction(
   transferStarterResources(house, newHouse);
   additions.push(newHouse);
 
-  if (house.stockpiles.wood >= cost) {
+  if (getResourceAmount(house.stockpiles, 'wood') >= cost) {
     house.construction.active = true;
-    house.construction.progress = Math.min(house.stockpiles.wood, house.construction.required);
+    house.construction.progress = Math.min(
+      getResourceAmount(house.stockpiles, 'wood'),
+      house.construction.required,
+    );
   }
 }
 
@@ -1580,22 +1743,17 @@ function redistributeMembersToNewHouse(
   ensureHouseCapacity(simulation.housing, child);
 }
 
+
 function transferStarterResources(parent: HouseState, child: HouseState): void {
-  const available = sanitizeResourceValue(parent.stockpiles.wood);
+  parent.stockpiles = ensureResourceBundle(parent.stockpiles);
+  child.stockpiles = ensureResourceBundle(child.stockpiles);
+  const available = getResourceAmount(parent.stockpiles, 'wood');
   if (available <= 0) {
-    child.stockpiles.wood = sanitizeResourceValue(child.stockpiles.wood);
     return;
   }
   const starter = Math.min(2, available);
-  parent.stockpiles.wood = available - starter;
-  child.stockpiles.wood = sanitizeResourceValue(child.stockpiles.wood) + starter;
-}
-
-function sanitizeResourceValue(value: number | undefined): number {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-  return value < 0 ? 0 : value;
+  removeResourceAmount(parent.stockpiles, 'wood', starter);
+  addResourceAmount(child.stockpiles, 'wood', starter);
 }
 
 function roundTo(value: number, decimals = 3): number {

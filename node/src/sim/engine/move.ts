@@ -6,13 +6,14 @@ import {
 } from './brain.ts';
 import type { CityState, HouseState } from './collectives.ts';
 import type { RngStream } from './rng.ts';
+import { clampPosition, getResourceStock, isWithinBounds, type WorldState } from './world.ts';
 import {
-  clampPosition,
-  getForestResourceAt,
-  isForestTile,
-  isWithinBounds,
-  type WorldState,
-} from './world.ts';
+  RESOURCE_TYPES,
+  cloneResourceBundle,
+  getResourceAmount,
+  type ResourceBundle,
+  type ResourceType,
+} from './resources.ts';
 
 type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
@@ -66,7 +67,9 @@ interface MovementBehaviorScoreInput {
   traitFlags: readonly string[];
   house: HouseState | null;
   houseDemand: Record<string, number>;
+  houseResourceNeeds: ResourceBundle;
   city: CityState | null;
+  cityResourceNeeds: ResourceBundle;
   context: MovementContext;
 }
 
@@ -431,7 +434,9 @@ function buildBehaviorInput(
     traitFlags: agent.traitFlags,
     house,
     houseDemand,
+    houseResourceNeeds: house ? cloneResourceBundle(house.resourceNeeds) : cloneResourceBundle(),
     city: context.city,
+    cityResourceNeeds: context.city ? cloneResourceBundle(context.city.resourceNeeds) : cloneResourceBundle(),
     context,
   };
 }
@@ -589,103 +594,88 @@ function buildPatrolLoop(
   return points;
 }
 
-function ensureHarvestTarget(
+
+function ensureResourceHarvestTarget(
   agent: MovableAgent,
   state: MovementState,
   input: MovementBehaviorScoreInput,
   context: MovementContext,
   stream: RngStream,
+  resourceType: ResourceType,
 ): MovementTarget {
-  const cached = state.data.harvestTarget;
-  if (cached && typeof cached === 'object' && cached) {
-    const target = cached as MovementTarget;
-    if (isForestTile(context.world, target.x, target.y)) {
-      const resources = getForestResourceAt(context.world, target.x, target.y);
-      if (resources > 0.2) {
-        return target;
-      }
+  const cachedType = typeof state.data.resourceType === 'string' ? (state.data.resourceType as ResourceType) : null;
+  const cached = state.data.harvestTarget as MovementTarget | undefined;
+  if (cached && cachedType === resourceType) {
+    const stock = getResourceStock(context.world, resourceType, cached.x, cached.y);
+    if (stock > 0.25) {
+      return cached;
     }
   }
 
   const anchor = getAnchorForAgent(input, context);
-  const attempts = 12;
-  const world = context.world;
-  const worldRadius = Math.hypot(world.centerX, world.centerY) || 1;
-  const baseRadius = 4 + agent.explorationBias * 6;
-
-  const hasNearbyForest = hasForestWithinRadius(world, anchor, Math.max(6, baseRadius * 0.8));
-  const distanceToForestRing = hasNearbyForest
-    ? 0
-    : estimateDistanceToForestRing(world, anchor, worldRadius);
-
-  let minRadius = Math.max(3, baseRadius);
-  if (distanceToForestRing > 0) {
-    minRadius = Math.max(minRadius, distanceToForestRing + 1.5);
-  }
-  minRadius = Math.min(minRadius, worldRadius);
-
-  const worldScaleRange = Math.max(6, worldRadius * (0.12 + agent.explorationBias * 0.18));
-  const maxRadius = Math.min(worldRadius, Math.max(minRadius + 1, minRadius + worldScaleRange));
+  const attempts = 16;
+  const baseRadius = 3.5 + agent.explorationBias * 7;
+  const worldRadius = Math.hypot(context.world.centerX, context.world.centerY) + 6;
 
   let best: MovementTarget = clampPosition(context.world, anchor.x, anchor.y);
-  let bestResources = 0;
+  let bestScore = 0;
 
   for (let i = 0; i < attempts; i += 1) {
-    const radiusRange = Math.max(0, maxRadius - minRadius);
-    const radius =
-      radiusRange <= 0.5
-        ? minRadius
-        : minRadius + stream.nextFloat() * radiusRange;
+    const radius = baseRadius * (0.6 + stream.nextFloat() * 1.4);
     const candidate = pickRandomPointNear(anchor.x, anchor.y, radius, context.world, stream);
-    if (!isForestTile(context.world, candidate.x, candidate.y)) {
-      continue;
-    }
-    const resources = getForestResourceAt(context.world, candidate.x, candidate.y);
-    if (resources > bestResources) {
-      bestResources = resources;
+    const stock = getResourceStock(context.world, resourceType, candidate.x, candidate.y);
+    if (stock > bestScore) {
       best = candidate;
+      bestScore = stock;
     }
-    if (bestResources > 0.5) {
+    if (bestScore > 1.5) {
       break;
     }
   }
 
-  if (bestResources <= 0) {
-    const fallback = findForestAlongDirections(world, anchor, worldRadius, stream);
+  if (bestScore <= 0.1) {
+    const fallback = searchResourceAlongDirections(
+      context.world,
+      anchor,
+      resourceType,
+      Math.max(baseRadius * 2, worldRadius),
+      stream,
+    );
     if (fallback) {
       best = fallback.target;
-      bestResources = fallback.resources;
+      bestScore = fallback.score;
     }
   }
 
   state.data.harvestTarget = best;
+  state.data.resourceType = resourceType;
   return best;
 }
 
-interface ForestTargetCandidate {
+interface ResourceTargetCandidate {
   target: MovementTarget;
-  resources: number;
+  score: number;
 }
 
-function findForestAlongDirections(
+function searchResourceAlongDirections(
   world: WorldState,
   anchor: MovementTarget,
+  resourceType: ResourceType,
   maxDistance: number,
   stream: RngStream,
-): ForestTargetCandidate | null {
-  const directions = buildForestSearchDirections(world, anchor, stream);
-  let best: ForestTargetCandidate | null = null;
+): ResourceTargetCandidate | null {
+  const directions = buildSearchDirections(world, anchor, stream);
+  let best: ResourceTargetCandidate | null = null;
 
   for (const direction of directions) {
-    const target = traceForestAlongDirection(world, anchor, direction, maxDistance);
-    if (!target) {
+    const candidate = traceResourceAlongDirection(world, anchor, direction, resourceType, maxDistance);
+    if (!candidate) {
       continue;
     }
-    const resources = getForestResourceAt(world, target.x, target.y);
-    if (!best || resources > best.resources) {
-      best = { target, resources };
+    if (!best || candidate.score > best.score) {
+      best = candidate;
     }
-    if (best && best.resources > 0.5) {
+    if (best.score > 1.5) {
       break;
     }
   }
@@ -693,7 +683,7 @@ function findForestAlongDirections(
   return best;
 }
 
-function buildForestSearchDirections(
+function buildSearchDirections(
   world: WorldState,
   anchor: MovementTarget,
   stream: RngStream,
@@ -717,21 +707,23 @@ function buildForestSearchDirections(
   return directions;
 }
 
-function traceForestAlongDirection(
+function traceResourceAlongDirection(
   world: WorldState,
   anchor: MovementTarget,
   direction: { x: number; y: number },
+  resourceType: ResourceType,
   maxDistance: number,
-): MovementTarget | null {
+): ResourceTargetCandidate | null {
   const norm = Math.hypot(direction.x, direction.y);
   if (norm <= EPSILON) {
     return null;
   }
   const dirX = direction.x / norm;
   const dirY = direction.y / norm;
-  const stepSize = 0.75;
+  const stepSize = 0.85;
   const steps = Math.max(1, Math.ceil(maxDistance / stepSize));
 
+  let best: ResourceTargetCandidate | null = null;
   for (let step = 1; step <= steps; step += 1) {
     const distance = step * stepSize;
     const sampleX = anchor.x + dirX * distance;
@@ -741,69 +733,23 @@ function traceForestAlongDirection(
     if (!isWithinBounds(world, tileX, tileY)) {
       break;
     }
-    if (isForestTile(world, sampleX, sampleY)) {
-      return clampPosition(world, sampleX, sampleY);
+    const stock = getResourceStock(world, resourceType, sampleX, sampleY);
+    if (stock <= 0) {
+      continue;
     }
-  }
-
-  return null;
-}
-
-function hasForestWithinRadius(world: WorldState, anchor: MovementTarget, radius: number): boolean {
-  const searchRadius = Math.max(0, radius);
-  const minX = Math.max(0, Math.floor(anchor.x - searchRadius));
-  const maxX = Math.min(world.width - 1, Math.ceil(anchor.x + searchRadius));
-  const minY = Math.max(0, Math.floor(anchor.y - searchRadius));
-  const maxY = Math.min(world.height - 1, Math.ceil(anchor.y + searchRadius));
-
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      if (isForestTile(world, x, y)) {
-        const dx = x - anchor.x;
-        const dy = y - anchor.y;
-        if (dx * dx + dy * dy <= searchRadius * searchRadius + EPSILON) {
-          return true;
-        }
-      }
+    const candidate: ResourceTargetCandidate = {
+      target: clampPosition(world, sampleX, sampleY),
+      score: stock,
+    };
+    if (!best || candidate.score > best.score) {
+      best = candidate;
     }
-  }
-
-  return false;
-}
-
-function estimateDistanceToForestRing(
-  world: WorldState,
-  anchor: MovementTarget,
-  worldRadius: number,
-): number {
-  if (isForestTile(world, anchor.x, anchor.y)) {
-    return 0;
-  }
-
-  const dx = anchor.x - world.centerX;
-  const dy = anchor.y - world.centerY;
-  const distanceFromCenter = Math.hypot(dx, dy);
-  const baseDirectionLength = Math.hypot(dx, dy);
-  const direction =
-    baseDirectionLength > EPSILON
-      ? { x: dx / baseDirectionLength, y: dy / baseDirectionLength }
-      : { x: 1, y: 0 };
-
-  const maxSteps = Math.ceil(worldRadius);
-  for (let step = 1; step <= maxSteps; step += 1) {
-    const sampleX = anchor.x + direction.x * step;
-    const sampleY = anchor.y + direction.y * step;
-    const tileX = Math.floor(sampleX);
-    const tileY = Math.floor(sampleY);
-    if (!isWithinBounds(world, tileX, tileY)) {
+    if (best.score > 1.5) {
       break;
     }
-    if (isForestTile(world, sampleX, sampleY)) {
-      return Math.hypot(sampleX - anchor.x, sampleY - anchor.y);
-    }
   }
 
-  return Math.max(0, worldRadius - distanceFromCenter);
+  return best;
 }
 
 function selectSocialAnchor(
@@ -947,22 +893,139 @@ registerMovementBehavior({
   },
 });
 
+
+
+const RESOURCE_DEMAND_TAGS: Record<ResourceType, string> = {
+  wood: 'wood',
+  forage: 'forage',
+  ore: 'ore',
+};
+
+interface ResourceNeedSummary {
+  type: ResourceType;
+  score: number;
+  houseNeed: number;
+  cityNeed: number;
+  demand: number;
+}
+
+interface CarriedResourceSummary {
+  type: ResourceType;
+  amount: number;
+}
+
+interface DeliveryPlan {
+  target: MovementTarget;
+  reach: number;
+  scope: 'house' | 'city' | 'anchor';
+}
+
+function getResourceDemandTag(type: ResourceType): string {
+  return RESOURCE_DEMAND_TAGS[type] ?? 'resource';
+}
+
+function evaluateResourceNeed(input: MovementBehaviorScoreInput, type: ResourceType): ResourceNeedSummary {
+  const houseNeed = Math.max(0, getResourceAmount(input.houseResourceNeeds, type));
+  const cityNeed = Math.max(0, getResourceAmount(input.cityResourceNeeds, type));
+  const demandTag = getResourceDemandTag(type);
+  const demandSignal = Math.max(0, (input.houseDemand[demandTag] ?? 0) - 1);
+  const score = houseNeed * 1.1 + cityNeed * 0.9 + demandSignal * 0.4;
+  return { type, score, houseNeed, cityNeed, demand: demandSignal };
+}
+
+function getHighestResourceNeed(input: MovementBehaviorScoreInput): ResourceNeedSummary | null {
+  let best: ResourceNeedSummary | null = null;
+  for (const type of RESOURCE_TYPES) {
+    const summary = evaluateResourceNeed(input, type);
+    if (summary.score <= 0.05) {
+      continue;
+    }
+    if (!best || summary.score > best.score) {
+      best = summary;
+    }
+  }
+  return best;
+}
+
+function getDominantCarriedResource(agent: MovableAgent): CarriedResourceSummary | null {
+  if (!agent.carriedResources) {
+    return null;
+  }
+  let best: CarriedResourceSummary | null = null;
+  for (const type of RESOURCE_TYPES) {
+    const amount = getResourceAmount(agent.carriedResources, type);
+    if (amount <= 0) {
+      continue;
+    }
+    if (!best || amount > best.amount) {
+      best = { type, amount };
+    }
+  }
+  return best;
+}
+
+function selectResourceFocus(agent: MovableAgent, input: MovementBehaviorScoreInput): ResourceNeedSummary | null {
+  const carried = getDominantCarriedResource(agent);
+  const bestNeed = getHighestResourceNeed(input);
+  if (carried) {
+    if (!bestNeed || carried.amount >= Math.max(0.6, bestNeed.score * 0.8)) {
+      return { type: carried.type, score: carried.amount, houseNeed: 0, cityNeed: 0, demand: 0 };
+    }
+    if (bestNeed.type === carried.type) {
+      return bestNeed;
+    }
+  }
+  return bestNeed;
+}
+
+function resolveDeliveryPlan(
+  input: MovementBehaviorScoreInput,
+  context: MovementContext,
+  resourceType: ResourceType,
+  state: MovementState,
+): DeliveryPlan {
+  const house = input.house;
+  const city = input.city;
+  const houseNeed = getResourceAmount(input.houseResourceNeeds, resourceType);
+  const cityNeed = getResourceAmount(input.cityResourceNeeds, resourceType);
+
+  if (house && (houseNeed >= cityNeed * 0.85 || !city)) {
+    const reach = Math.max(1.5, house.radius + 1.5);
+    return { target: { x: house.x, y: house.y }, reach, scope: 'house' };
+  }
+
+  if (city) {
+    const reach = Math.max(2.5, city.radius + 2.5);
+    return { target: { x: city.x, y: city.y }, reach, scope: 'city' };
+  }
+
+  const anchor = getAnchorForAgent(input, context);
+  return { target: anchor, reach: 1.75, scope: 'anchor' };
+}
+
 registerMovementBehavior({
-  id: 'build-forage',
-  score({ tags, houseDemand, metadata }) {
-    const buildTag = tags.includes('build') || tags.includes('work') || metadata.id === 'BuildDwelling';
-    const woodSignal = houseDemand.wood ?? 0;
-    const woodPressure = woodSignal > 1 ? woodSignal - 1 : 0;
-    if (!buildTag && woodPressure <= 0) {
-      return 0;
+  id: 'resource-harvest',
+  score(input) {
+    const { tags, metadata } = input;
+    const gatherTag =
+      tags.includes('resource') ||
+      tags.includes('work') ||
+      tags.includes('build') ||
+      metadata.id === 'Gather' ||
+      metadata.id === 'BuildDwelling';
+    const need = getHighestResourceNeed(input);
+    if (!need) {
+      return gatherTag ? 0.2 : 0;
     }
-    let score = 0.45;
-    if (buildTag) {
-      score += 0.5;
+    let score = 0.25 + need.score * 0.55;
+    if (gatherTag) {
+      score += 0.4;
     }
-    if (woodPressure > 0) {
-      const cappedPressure = Math.min(woodPressure, 3);
-      score += 0.65 + cappedPressure * 0.35;
+    if (tags.includes('build') || metadata.id === 'BuildDwelling') {
+      score += 0.25;
+    }
+    if (metadata.id === 'Gather') {
+      score += 0.2;
     }
     return score;
   },
@@ -971,15 +1034,29 @@ registerMovementBehavior({
     state.timer = 0;
   },
   update(agent, state, context, stream, input) {
-    const phase = typeof state.data.phase === 'string' ? (state.data.phase as string) : 'harvest';
+    const focus = selectResourceFocus(agent, input);
+    if (!focus) {
+      state.data.phase = 'idle';
+      state.data.resourceType = null;
+      return { satisfied: true, target: state.target ?? null };
+    }
+    const resourceType = focus.type;
+    const phase = state.data.phase === 'deliver' ? 'deliver' : 'harvest';
+    if (state.data.resourceType !== resourceType) {
+      state.data.resourceType = resourceType;
+      state.data.harvestTarget = null;
+    }
+
     if (phase === 'harvest') {
-      const harvestTarget = ensureHarvestTarget(agent, state, input, context, stream);
+      const harvestTarget = ensureResourceHarvestTarget(agent, state, input, context, stream, resourceType);
       if (isCloseTo(agent, harvestTarget, TARGET_REACH_SQ * 1.2)) {
         const gatherTime = 2 + Math.floor(stream.nextFloat() * 4);
+        const plan = resolveDeliveryPlan(input, context, resourceType, state);
         state.data.phase = 'deliver';
         state.data.harvestTarget = harvestTarget;
-        const anchor = getAnchorForAgent(input, context);
-        state.data.deliverTarget = anchor;
+        state.data.deliverTarget = plan.target;
+        state.data.deliveryScope = plan.scope;
+        state.data.deliveryReach = plan.reach;
         return {
           target: harvestTarget,
           lingerTicks: gatherTime,
@@ -989,20 +1066,26 @@ registerMovementBehavior({
       return { target: harvestTarget, timer: state.timer > 0 ? state.timer : 6 };
     }
 
-    const deliverTarget = (state.data.deliverTarget as MovementTarget) ?? getAnchorForAgent(input, context);
-    const reach = Math.max(1.5, (input.house?.radius ?? 1) + 1.5);
-    if (isCloseTo(agent, deliverTarget, reach * reach)) {
+    const plan = resolveDeliveryPlan(input, context, resourceType, state);
+    state.data.deliverTarget = plan.target;
+    state.data.deliveryScope = plan.scope;
+    state.data.deliveryReach = plan.reach;
+
+    const reachSq = plan.reach * plan.reach;
+    if (isCloseTo(agent, plan.target, reachSq)) {
       state.data.phase = 'harvest';
+      state.data.harvestTarget = null;
       const lingering = 1 + Math.floor(stream.nextFloat() * 2);
-      const stillNeedsWood = (input.houseDemand.wood ?? 0) > 1.05;
+      const needSummary = evaluateResourceNeed(input, resourceType);
+      const stillNeeds = needSummary.score > 0.4;
       return {
-        target: deliverTarget,
+        target: plan.target,
         lingerTicks: lingering,
-        satisfied: !stillNeedsWood,
+        satisfied: !stillNeeds,
       };
     }
 
-    return { target: deliverTarget };
+    return { target: plan.target };
   },
 });
 
