@@ -4,6 +4,10 @@ const DARK_GRADIENT_OUTER = 'rgba(2, 6, 23, 0.98)';
 const EDGE_COLOR = 'rgba(94, 234, 212, 0.28)';
 const EDGE_DECISION_COLOR = 'rgba(56, 189, 248, 0.92)';
 const EDGE_DECISION_GLOW = 'rgba(14, 165, 233, 0.35)';
+const EDGE_POTENTIATION_COLOR = 'rgba(56, 189, 248, 0.85)';
+const EDGE_POTENTIATION_GLOW = 'rgba(125, 211, 252, 0.42)';
+const EDGE_DEPRESSION_COLOR = 'rgba(248, 113, 113, 0.78)';
+const EDGE_DEPRESSION_GLOW = 'rgba(251, 113, 133, 0.38)';
 const NODE_FILL = 'rgba(30, 41, 59, 0.92)';
 const NODE_STROKE = 'rgba(148, 163, 184, 0.55)';
 const NODE_HIGHLIGHT_FILL = '#facc15';
@@ -13,6 +17,7 @@ const NODE_LABEL_MUTED = 'rgba(226, 232, 240, 0.7)';
 const PARTICLE_COLOR = 'rgba(125, 211, 252, 0.82)';
 const GRID_COLOR = 'rgba(15, 118, 110, 0.08)';
 const GRID_STEP = 14;
+const EDGE_ADJUSTMENT_MAX = 1;
 
 const PARTICLE_BASE_OPACITY = 0.58;
 const PARTICLE_OPACITY_RANGE = 0.38;
@@ -88,7 +93,11 @@ function computeDataSignature(data) {
     .sort()
     .join('|');
   const edgePart = (data.edges ?? [])
-    .map((edge) => `${edge?.from ?? ''}->${edge?.to ?? ''}:${Number(edge?.weight ?? 0).toFixed(3)}`)
+    .map((edge) =>
+      `${edge?.from ?? ''}->${edge?.to ?? ''}:${Number(edge?.weight ?? 0).toFixed(3)}:${Number(
+        edge?.adjustment ?? 0,
+      ).toFixed(3)}`,
+    )
     .sort()
     .join(';');
   const current = data.currentNodeId ?? '';
@@ -126,7 +135,18 @@ function computeDataSignature(data) {
   const fillMetaPart = rawNodeFill
     ? `${rawNodeFill.lockedNodeId ?? ''}|${rawNodeFill.containsRecentCharge ? 1 : 0}`
     : 'none';
-  return `${nodePart}__${edgePart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}`;
+  const plasticityEdgesPart = Array.isArray(data?.plasticity?.edges)
+    ? data.plasticity.edges
+        .map((edge) =>
+          `${edge?.from ?? ''}->${edge?.to ?? ''}:${Number(edge?.adjustment ?? 0).toFixed(3)}`,
+        )
+        .sort()
+        .join(';')
+    : 'none';
+  const plasticityTickPart = Number.isFinite(data?.plasticity?.tick)
+    ? Number(data.plasticity.tick).toFixed(0)
+    : 'none';
+  return `${nodePart}__${edgePart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}__${plasticityTickPart}|${plasticityEdgesPart}`;
 }
 
 function resolveClampValue(viewportClamp, minHeight) {
@@ -206,6 +226,24 @@ export class BrainViewer {
       display: 'none',
     });
     this.root.appendChild(this.labelEl);
+
+    this.plasticityLegendEl = document.createElement('div');
+    Object.assign(this.plasticityLegendEl.style, {
+      position: 'absolute',
+      bottom: '10px',
+      left: '12px',
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: '11px',
+      letterSpacing: '0.04em',
+      textTransform: 'uppercase',
+      color: 'rgba(148, 163, 184, 0.85)',
+      pointerEvents: 'none',
+      textShadow: '0 2px 6px rgba(2, 6, 23, 0.85)',
+    });
+    this._plasticityLegendDefault = 'Plasticity: teal ↑ / rose ↓';
+    this.plasticityLegendEl.textContent = this._plasticityLegendDefault;
+    this.plasticityLegendEl.style.display = 'none';
+    this.root.appendChild(this.plasticityLegendEl);
 
     this.emptyState = document.createElement('div');
     this.emptyState.textContent = 'No brain state available.';
@@ -327,6 +365,7 @@ export class BrainViewer {
           decision: data.decision ?? null,
           transition,
           summary: data.summary ?? null,
+          plasticity: data.plasticity ?? null,
         }
       : null;
     this.emptyState.style.display = this._data ? 'none' : 'flex';
@@ -348,6 +387,11 @@ export class BrainViewer {
       this._needsLayout = true;
       this._needsRedraw = true;
       this._stopAnimation();
+      this.canvas.title = 'Brain connectivity graph';
+      if (this.plasticityLegendEl) {
+        this.plasticityLegendEl.textContent = this._plasticityLegendDefault;
+        this.plasticityLegendEl.style.display = 'none';
+      }
       this._drawBackground();
       return;
     }
@@ -358,13 +402,50 @@ export class BrainViewer {
     });
 
     this._edges = [...(this._data.edges ?? [])]
-      .map((edge) => ({
-        id: `${edge.from}->${edge.to}`,
-        fromId: edge.from,
-        toId: edge.to,
-        weight: Number.isFinite(edge.weight) ? Number(edge.weight) : Number(edge.weight ?? 0) || 0,
-      }))
+      .map((edge) => {
+        const baseWeight = Number(edge.baseWeight ?? edge.weight ?? 0);
+        const adjustment = Number(edge.adjustment ?? 0);
+        const weightValue = Number(edge.weight ?? baseWeight + adjustment);
+        const usageCount = Number(edge.usageCount ?? 0);
+        const sanitizedBase = Number.isFinite(baseWeight) ? baseWeight : 0;
+        const sanitizedAdjustment = Number.isFinite(adjustment) ? adjustment : 0;
+        const sanitizedWeight = Number.isFinite(weightValue) ? weightValue : sanitizedBase + sanitizedAdjustment;
+        return {
+          id: `${edge.from}->${edge.to}`,
+          fromId: edge.from,
+          toId: edge.to,
+          baseWeight: sanitizedBase,
+          adjustment: sanitizedAdjustment,
+          weight: Math.max(0, sanitizedWeight),
+          usageCount: Number.isFinite(usageCount) ? usageCount : 0,
+        };
+      })
       .filter((edge) => edge.fromId && edge.toId);
+
+    const adjustmentEdges = this._edges.filter((edge) => Math.abs(edge.adjustment) > 1e-6);
+    if (adjustmentEdges.length > 0) {
+      const summary = adjustmentEdges
+        .slice(0, 8)
+        .map((edge) =>
+          `${edge.fromId}→${edge.toId}:${edge.adjustment >= 0 ? '+' : ''}${edge.adjustment.toFixed(3)}`,
+        )
+        .join(', ');
+      this.canvas.title = `Plasticity adjustments: ${summary}`;
+      if (this.plasticityLegendEl) {
+        const tick = Number(data?.plasticity?.tick);
+        const legendText = Number.isFinite(tick)
+          ? `${this._plasticityLegendDefault} (tick ${Math.max(0, Math.round(tick))})`
+          : this._plasticityLegendDefault;
+        this.plasticityLegendEl.textContent = legendText;
+        this.plasticityLegendEl.style.display = 'block';
+      }
+    } else {
+      this.canvas.title = 'Brain connectivity graph';
+      if (this.plasticityLegendEl) {
+        this.plasticityLegendEl.textContent = this._plasticityLegendDefault;
+        this.plasticityLegendEl.style.display = 'none';
+      }
+    }
 
     this._nodePositions = new Map();
     this._edgeSegments = [];
@@ -703,11 +784,19 @@ export class BrainViewer {
         if (!from || !to) {
           return null;
         }
+        const weight = Math.max(0, Number(edge.weight ?? 0));
+        const baseWeight = Number.isFinite(edge.baseWeight) ? edge.baseWeight : weight;
+        const adjustment = Number(edge.adjustment ?? 0);
+        const usageCount = Number.isFinite(edge.usageCount) ? edge.usageCount : 0;
         return {
           id: edge.id,
           from,
           to,
-          weight: edge.weight,
+          weight,
+          baseWeight,
+          adjustment,
+          usageCount,
+          adjustmentMagnitude: Math.abs(adjustment),
           length: Math.hypot(to.x - from.x, to.y - from.y),
         };
       })
@@ -1242,17 +1331,52 @@ export class BrainViewer {
     for (const segment of this._edgeSegments) {
       const isDecision = decisionKey !== 'none' && decisionKey.startsWith(segment.id);
       ctx.save();
-      ctx.globalAlpha = isDecision ? Math.min(1, 0.7 + pulse * 0.6) : 0.55 + Math.min(0.35, segment.weight * 0.25);
-      ctx.lineWidth = isDecision ? 3 : 1.6;
-      ctx.strokeStyle = isDecision ? EDGE_DECISION_COLOR : EDGE_COLOR;
+      const weightMagnitude = Math.max(0, segment.weight ?? 0);
+      const adjustment = Number(segment.adjustment ?? 0);
+      const adjustmentRatio = Math.min(1, Math.abs(adjustment) / EDGE_ADJUSTMENT_MAX);
+      const hasAdjustment = adjustmentRatio > 0;
+      const isPotentiated = adjustment > 0;
+      const isSuppressed = adjustment < 0;
+
+      let strokeColor = EDGE_COLOR;
+      if (isPotentiated) {
+        strokeColor = EDGE_POTENTIATION_COLOR;
+      } else if (isSuppressed) {
+        strokeColor = EDGE_DEPRESSION_COLOR;
+      }
+
+      let alpha = 0.45 + Math.min(0.35, weightMagnitude * 0.25);
+      if (hasAdjustment) {
+        alpha = Math.max(alpha, 0.45 + adjustmentRatio * 0.45);
+      }
+      if (isDecision) {
+        alpha = Math.min(1, 0.7 + pulse * 0.6);
+      }
+
+      let lineWidth = 1.6 + weightMagnitude * 0.6;
+      if (hasAdjustment) {
+        lineWidth += adjustmentRatio * 1.2;
+      }
+      if (isDecision) {
+        lineWidth = Math.max(lineWidth, 3 + adjustmentRatio * 1.2);
+      }
+
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = isDecision ? EDGE_DECISION_COLOR : strokeColor;
       ctx.beginPath();
       ctx.moveTo(segment.from.x, segment.from.y);
       ctx.lineTo(segment.to.x, segment.to.y);
       ctx.stroke();
-      if (isDecision) {
-        ctx.globalAlpha = 0.45 * pulse;
-        ctx.strokeStyle = EDGE_DECISION_GLOW;
-        ctx.lineWidth = 7;
+      if (isDecision || hasAdjustment) {
+        const glowStrength = isDecision ? pulse : adjustmentRatio;
+        ctx.globalAlpha = isDecision ? 0.45 * pulse : 0.35 + glowStrength * 0.25;
+        ctx.strokeStyle = isDecision
+          ? EDGE_DECISION_GLOW
+          : isPotentiated
+            ? EDGE_POTENTIATION_GLOW
+            : EDGE_DEPRESSION_GLOW;
+        ctx.lineWidth = isDecision ? lineWidth + 4 : lineWidth + 2;
         ctx.beginPath();
         ctx.moveTo(segment.from.x, segment.from.y);
         ctx.lineTo(segment.to.x, segment.to.y);

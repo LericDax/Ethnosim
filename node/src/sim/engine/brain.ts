@@ -10,9 +10,11 @@ import {
   advancePlasticityState,
   applyPlasticityToWeight,
   createPlasticityState,
-  registerPlasticityTransition,
+  registerPlasticityOutcome,
   type PlasticityEdgeState,
   type PlasticityState,
+  type SerializedPlasticityState,
+  type SerializedPlasticityEdgeState,
 } from './plasticity.ts';
 
 export interface BrainNodeDefinition {
@@ -67,14 +69,19 @@ interface ActiveJumpEdgeState {
 
 type JumpEdgeCooldownMap = Record<string, number>;
 
+const LOW_MULTIPLIER_FAILURE_THRESHOLD = 0.35;
+
 export interface BrainDecisionFactor {
   nodeId: string;
   desirability: number;
   edgeWeight: number;
+  baseWeight: number;
+  plasticityAdjustment: number;
   baseFrequency: number;
   moodMultiplier: number;
   personalityMultiplier: number;
   demandMultiplier: number;
+  totalMultiplier: number;
   tags: string[];
 }
 
@@ -168,11 +175,6 @@ export interface SerializedActiveJumpEdgeState {
 export interface SerializedDynamicEdgeEntry {
   sourceId: string;
   targets: Array<{ targetId: string; weight: number }>;
-}
-
-export interface SerializedPlasticityState {
-  tick: number;
-  edges: Record<string, Record<string, PlasticityEdgeState>>;
 }
 
 interface SerializedRecentNodeChargeState extends SerializedNodeChargeState {
@@ -633,9 +635,9 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
     });
   }
 
-  const plasticityEdges: Record<string, Record<string, PlasticityEdgeState>> = {};
+  const plasticityEdges: Record<string, Record<string, SerializedPlasticityEdgeState>> = {};
   for (const [sourceId, targetMap] of state.plasticity.edges.entries()) {
-    const serializedTargets: Record<string, PlasticityEdgeState> = {};
+    const serializedTargets: Record<string, SerializedPlasticityEdgeState> = {};
     for (const [targetId, edgeState] of targetMap.entries()) {
       serializedTargets[targetId] = { ...edgeState };
     }
@@ -890,7 +892,7 @@ export function tickBrain(
 
   if (state.nodeTimer <= 0) {
     const bestCandidate = candidates[0];
-    if (bestCandidate) {
+    if (bestCandidate && bestCandidate.desirability > 0) {
       const targetMetadata = brain.nodes.get(bestCandidate.nodeId);
       const threshold = getNodeChargeCapacity(targetMetadata);
       const currentCharge = state.nodeCharge.get(bestCandidate.nodeId)?.value ?? 0;
@@ -909,9 +911,26 @@ export function tickBrain(
       candidates,
       chosenNodeId: nextNodeId,
     };
-    registerPlasticityTransition(state.plasticity, fromNodeId, nextNodeId);
+    registerPlasticityOutcome(state.plasticity, fromNodeId, nextNodeId, 1);
     state.lastDecision = decision;
     commitBrainTransition(state, nextNodeId);
+  } else {
+    const bestCandidate = candidates[0];
+    if (bestCandidate) {
+      const fromNodeId = state.currentNodeId;
+      const gateMultiplier = Math.min(bestCandidate.moodMultiplier, bestCandidate.demandMultiplier);
+      const timerExpired = state.nodeTimer <= 0;
+      const suppressedByMultipliers = gateMultiplier < LOW_MULTIPLIER_FAILURE_THRESHOLD;
+      if (timerExpired || suppressedByMultipliers) {
+        const penalty = Math.min(
+          1,
+          Math.max(timerExpired ? 1 : 0, suppressedByMultipliers ? 1 - gateMultiplier : 0),
+        );
+        if (penalty > 0) {
+          registerPlasticityOutcome(state.plasticity, fromNodeId, bestCandidate.nodeId, -penalty);
+        }
+      }
+    }
   }
 
   return {
@@ -932,10 +951,13 @@ export function cloneBrainDecision(decision: BrainDecision | null): BrainDecisio
       nodeId: candidate.nodeId,
       desirability: candidate.desirability,
       edgeWeight: candidate.edgeWeight,
+      baseWeight: candidate.baseWeight,
+      plasticityAdjustment: candidate.plasticityAdjustment,
       baseFrequency: candidate.baseFrequency,
       moodMultiplier: candidate.moodMultiplier,
       personalityMultiplier: candidate.personalityMultiplier,
       demandMultiplier: candidate.demandMultiplier,
+      totalMultiplier: candidate.totalMultiplier,
       tags: [...candidate.tags],
     })),
   } satisfies BrainDecision;
@@ -1314,16 +1336,21 @@ function evaluateCandidates(
     const moodMultiplier = productForTags(targetNode.tags, multipliers.mood);
     const personalityMultiplier = productForTags(targetNode.tags, multipliers.personality);
     const demandMultiplier = productForTags(targetNode.tags, multipliers.demand);
+    const totalMultiplier = moodMultiplier * personalityMultiplier * demandMultiplier;
+    const plasticityAdjustment = adjustedWeight - edge.weight;
     const desirability =
-      adjustedWeight * targetNode.baseFrequency * moodMultiplier * personalityMultiplier * demandMultiplier;
+      adjustedWeight * targetNode.baseFrequency * totalMultiplier;
     candidates.push({
       nodeId: targetNode.id,
       desirability,
       edgeWeight: adjustedWeight,
+      baseWeight: edge.weight,
+      plasticityAdjustment,
       baseFrequency: targetNode.baseFrequency,
       moodMultiplier,
       personalityMultiplier,
       demandMultiplier,
+      totalMultiplier,
       tags: targetNode.tags,
     });
   }

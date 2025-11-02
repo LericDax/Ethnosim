@@ -239,12 +239,26 @@ interface SnapshotBrainFill {
   lockedNodeId: string | null;
 }
 
+interface SnapshotPlasticityEdge {
+  from: string;
+  to: string;
+  adjustment: number;
+  usageCount: number;
+  nextDecayTick: number;
+}
+
+interface SnapshotBrainPlasticity {
+  tick: number;
+  edges: SnapshotPlasticityEdge[];
+}
+
 interface SnapshotBrainData {
   summary: SnapshotBrainSummary;
   state: SerializedBrainState;
   pulses: SnapshotBrainPulse[];
   fillRatios: Record<string, number>;
   nodeFill?: SnapshotBrainFill | null;
+  plasticity: SnapshotBrainPlasticity;
 }
 
 interface SnapshotAgent {
@@ -1775,6 +1789,38 @@ function extractSnapshotFillRatios(brain: BrainState): SnapshotBrainFill | null 
   } satisfies SnapshotBrainFill;
 }
 
+function extractSnapshotPlasticity(brain: BrainState): SnapshotBrainPlasticity {
+  const edges: SnapshotPlasticityEdge[] = [];
+  for (const [fromId, targets] of brain.plasticity.edges.entries()) {
+    for (const [toId, edgeState] of targets.entries()) {
+      edges.push({
+        from: fromId,
+        to: toId,
+        adjustment: edgeState.adjustment,
+        usageCount: edgeState.usageCount,
+        nextDecayTick: edgeState.nextDecayTick,
+      });
+    }
+  }
+
+  edges.sort((a, b) => {
+    const magnitudeDiff = Math.abs(b.adjustment) - Math.abs(a.adjustment);
+    if (Math.abs(magnitudeDiff) > 0) {
+      return magnitudeDiff;
+    }
+    const fromCompare = a.from.localeCompare(b.from);
+    if (fromCompare !== 0) {
+      return fromCompare;
+    }
+    return a.to.localeCompare(b.to);
+  });
+
+  return {
+    tick: brain.plasticity.tick,
+    edges,
+  } satisfies SnapshotBrainPlasticity;
+}
+
 const SAFE_NUMBER_MASK = BigInt('0x1fffffffffffff');
 
 export function createSnapshot(simulation: SimulationState): Snapshot {
@@ -1966,6 +2012,7 @@ function createBrainSnapshot(
   const pulses = extractSnapshotBrainPulses(brain);
   const fillInfo = extractSnapshotFillRatios(brain);
   const fillRatios = fillInfo?.ratios ?? {};
+  const plasticity = extractSnapshotPlasticity(brain);
   const transition: SnapshotBrainTransitionTiming = {
     durationTicks: safeDurationTicks,
     remainingTicks,
@@ -1992,6 +2039,7 @@ function createBrainSnapshot(
     pulses,
     fillRatios,
     nodeFill: fillInfo,
+    plasticity,
   };
 }
 
