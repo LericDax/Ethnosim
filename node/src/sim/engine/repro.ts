@@ -6,6 +6,7 @@ import { createFetusTemperament, applyGestationalStress } from './temperament.ts
 import { createTraitProfile } from './traits.ts';
 import { sampleChromosomes } from './chromosomes.ts';
 import { createInitialMovementState } from './move.ts';
+import { createResourceBundle } from './resources.ts';
 
 const CONCEPTION_RATE_MULTIPLIER = 0.02;
 export const GESTATION_TICKS = 200;
@@ -314,7 +315,7 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     traitFlags: [...traitProfile.traitFlags],
     moods: buildInitialMoodStateFromProfile(traitProfile),
     houseId: parent.houseId,
-    carriedResources: { wood: 0 },
+    carriedResources: createResourceBundle(),
     resourceActivity: null,
     movement: createInitialMovementState(),
   };
