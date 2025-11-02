@@ -848,6 +848,13 @@ function combineMoodMultipliers(
   moodLevels: Record<string, number> | undefined,
 ): Record<string, number> | undefined {
   const combined: Record<string, number> = {};
+  const applyScale = (key: string, scale: number): void => {
+    if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 1e-6) {
+      return;
+    }
+    const existing = combined[key] ?? 1;
+    combined[key] = existing * scale;
+  };
   if (base) {
     for (const [tag, value] of Object.entries(base)) {
       const numeric = Number(value);
@@ -865,6 +872,14 @@ function combineMoodMultipliers(
       }
       const existing = combined[tag] ?? 1;
       combined[tag] = existing * multiplier;
+    }
+    const rawUnhoused = moodLevels.unhoused;
+    const unhousedLevel = Number(rawUnhoused);
+    if (Number.isFinite(unhousedLevel) && unhousedLevel > 0) {
+      const capped = Math.min(unhousedLevel, 3);
+      applyScale('home', 1 + capped * 0.45);
+      applyScale('build', 1 + capped * 0.6);
+      applyScale('work', 1 + capped * 0.35);
     }
   }
   return Object.keys(combined).length > 0 ? combined : undefined;
@@ -892,11 +907,44 @@ function createEffectiveMultipliers(
 }
 
 function buildMultiplierEmbedding(multipliers: BrainMultiplierSet): number[] {
-  const components: number[][] = [];
-  if (multipliers.mood) {
-    const moodEmbedding = embeddingFromTagWeights(multipliers.mood, MULTIPLIER_CONTEXT_WEIGHT_MOOD);
+  const components: { vector: number[]; weight: number }[] = [];
+  const moodMap = multipliers.mood;
+  const rawUnhoused = moodMap ? moodMap.unhoused : undefined;
+  const unhousedPressure =
+    typeof rawUnhoused === 'number' && Number.isFinite(rawUnhoused) && rawUnhoused > 1
+      ? Math.min(2.5, rawUnhoused - 1)
+      : 0;
+
+  const adjustMood = (map: Record<string, number>, key: string, scale: number): void => {
+    if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 1e-6) {
+      return;
+    }
+    const current = map[key];
+    if (typeof current === 'number' && Number.isFinite(current) && current > 0) {
+      map[key] = current * scale;
+    } else {
+      map[key] = scale;
+    }
+  };
+
+  let adjustedMoodMap: Record<string, number> | undefined;
+  if (moodMap) {
+    adjustedMoodMap = { ...moodMap };
+  } else if (unhousedPressure > 0) {
+    adjustedMoodMap = {};
+  }
+
+  if (adjustedMoodMap && unhousedPressure > 0) {
+    adjustMood(adjustedMoodMap, 'home', 1 + unhousedPressure * 0.5);
+    adjustMood(adjustedMoodMap, 'build', 1 + unhousedPressure * 0.7);
+    adjustMood(adjustedMoodMap, 'work', 1 + unhousedPressure * 0.45);
+    adjustMood(adjustedMoodMap, 'outward', 1 + unhousedPressure * 0.3);
+  }
+
+  if (adjustedMoodMap) {
+    const moodEmbedding = embeddingFromTagWeights(adjustedMoodMap, MULTIPLIER_CONTEXT_WEIGHT_MOOD);
     if (!isZeroEmbedding(moodEmbedding)) {
-      components.push(moodEmbedding);
+      components.push({ vector: moodEmbedding, weight: 1 });
     }
   }
   if (multipliers.personality) {
@@ -905,13 +953,13 @@ function buildMultiplierEmbedding(multipliers: BrainMultiplierSet): number[] {
       MULTIPLIER_CONTEXT_WEIGHT_PERSONALITY,
     );
     if (!isZeroEmbedding(personalityEmbedding)) {
-      components.push(personalityEmbedding);
+      components.push({ vector: personalityEmbedding, weight: 1 });
     }
   }
   if (multipliers.demand) {
     const demandEmbedding = embeddingFromTagWeights(multipliers.demand, MULTIPLIER_CONTEXT_WEIGHT_DEMAND);
     if (!isZeroEmbedding(demandEmbedding)) {
-      components.push(demandEmbedding);
+      components.push({ vector: demandEmbedding, weight: 1 });
     }
   }
   if (multipliers.relationship) {
@@ -920,7 +968,9 @@ function buildMultiplierEmbedding(multipliers: BrainMultiplierSet): number[] {
       MULTIPLIER_CONTEXT_WEIGHT_RELATIONSHIP,
     );
     if (!isZeroEmbedding(relationshipEmbedding)) {
-      components.push(relationshipEmbedding);
+      const relationshipWeight =
+        unhousedPressure > 0 ? Math.max(0.6, 1 - unhousedPressure * 0.25) : 1;
+      components.push({ vector: relationshipEmbedding, weight: relationshipWeight });
     }
   }
 
@@ -929,10 +979,20 @@ function buildMultiplierEmbedding(multipliers: BrainMultiplierSet): number[] {
   }
 
   const aggregate = createZeroEmbedding();
-  for (const vector of components) {
-    addScaledEmbedding(aggregate, vector, 1);
+  let totalWeight = 0;
+  for (const { vector, weight } of components) {
+    if (!Number.isFinite(weight) || weight <= 0) {
+      continue;
+    }
+    addScaledEmbedding(aggregate, vector, weight);
+    totalWeight += weight;
   }
-  scaleEmbedding(aggregate, 1 / components.length);
+
+  if (totalWeight <= 0) {
+    return createZeroEmbedding();
+  }
+
+  scaleEmbedding(aggregate, 1 / totalWeight);
   return normalizeEmbedding(aggregate);
 }
 
