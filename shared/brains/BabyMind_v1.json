@@ -38,6 +38,7 @@
     ["Feed", "SleepWarm", 1.0],
     ["SleepWarm", "ObserveVoices", 1.0],
     ["ObserveVoices", "CryForCare", 0.8],
+    ["ObserveVoices", "FearScream", 0.35],
     ["FearScream", "CryForCare", 1.0]
   ],
   "start_node": "CryForCare"
