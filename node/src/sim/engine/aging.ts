@@ -1,4 +1,8 @@
-import { createBrainState, getCurrentNodeMetadata } from './brain.ts';
+import {
+  createBrainState,
+  getCurrentNodeMetadata,
+  type BrainMigrationSeed,
+} from './brain.ts';
 import type { AgentState, LifeStage, SimulationState } from '../sim.worker.ts';
 import type { RngStream } from './rng.ts';
 
@@ -64,11 +68,14 @@ export function transitionToStage(
     return;
   }
 
+  const nextBrainId = STAGE_BRAIN_IDS[stage] ?? agent.brain.brainId;
+  const migrationSeed = prepareBrainMigrationSeed(agent, nextBrainId);
+
   agent.lifeStage = stage;
   agent.ageTicks = 0;
 
-  const brainId = STAGE_BRAIN_IDS[stage] ?? agent.brain.brainId;
-  agent.brain = createBrainState(brainId);
+  const brainId = nextBrainId;
+  agent.brain = createBrainState(brainId, migrationSeed ?? undefined);
   const metadata = getCurrentNodeMetadata(agent.brain);
   agent.brainNodeDuration = metadata.duration;
   agent.brainDecision = null;
@@ -87,4 +94,50 @@ export function transitionToStage(
   if (stage === 'adult') {
     agent.caregiverId = null;
   }
+}
+
+function prepareBrainMigrationSeed(agent: AgentState, nextBrainId: string): BrainMigrationSeed | null {
+  const previousBrain = agent.brain;
+  if (!previousBrain || previousBrain.brainId === nextBrainId) {
+    return null;
+  }
+
+  const plasticityEdges: BrainMigrationSeed['plasticityEdges'] = [];
+  for (const [sourceId, targetMap] of previousBrain.plasticity.edges.entries()) {
+    for (const [targetId, edgeState] of targetMap.entries()) {
+      plasticityEdges.push({
+        sourceId,
+        targetId,
+        state: {
+          adjustment: edgeState.adjustment,
+          usageCount: edgeState.usageCount,
+          nextDecayTick: edgeState.nextDecayTick,
+        },
+      });
+    }
+  }
+
+  const recentAssociations: BrainMigrationSeed['recentAssociations'] = [];
+  for (const association of previousBrain.recentAssociations.values()) {
+    recentAssociations.push({
+      sourceId: association.sourceId,
+      targetId: association.targetId,
+      weight: association.weight,
+      ttl: association.ttl,
+      decay: association.decay,
+    });
+  }
+
+  const contextEmbedding = [...previousBrain.contextEmbedding];
+  const currentNode = getCurrentNodeMetadata(previousBrain);
+
+  return {
+    sourceBrainId: previousBrain.brainId,
+    targetBrainId: nextBrainId,
+    plasticityTick: previousBrain.plasticity.tick,
+    plasticityEdges,
+    recentAssociations,
+    contextEmbedding,
+    sourceActiveNodeDuration: currentNode.duration,
+  };
 }
