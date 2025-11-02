@@ -320,6 +320,8 @@ export function updateRelationshipMultipliers(agent: AgentState): void {
   let trustCount = 0;
   let obligationTotal = 0;
   let rivalryPeak = 0;
+  let homeMultiplier = 1;
+  let buildMultiplier = 1;
   for (const weights of Object.values(state.weights)) {
     if (weights.trust > MIN_EFFECT_THRESHOLD) {
       trustTotal += weights.trust;
@@ -340,16 +342,25 @@ export function updateRelationshipMultipliers(agent: AgentState): void {
     multipliers.social = 1 + scaled * 0.4;
     multipliers.care = 1 + scaled * 0.3;
     multipliers.loyalty = 1 + scaled * 0.28;
+    homeMultiplier *= 1 + scaled * 0.2;
+    buildMultiplier *= 1 + scaled * 0.24;
   }
   if (obligation > MIN_EFFECT_THRESHOLD) {
     const scaled = Math.min(1.5, obligation);
     multipliers.duty = 1 + scaled * 0.5;
-    multipliers.home = 1 + scaled * 0.35;
+    homeMultiplier *= 1 + scaled * 0.45;
+    buildMultiplier *= 1 + scaled * 0.35;
   }
   if (rivalry > MIN_EFFECT_THRESHOLD) {
     const scaled = Math.min(1, rivalry);
     multipliers.guard = 1 + scaled * 0.5;
     multipliers.fear = 1 + scaled * 0.35;
+  }
+  if (homeMultiplier > 1) {
+    multipliers.home = homeMultiplier;
+  }
+  if (buildMultiplier > 1) {
+    multipliers.build = buildMultiplier;
   }
   agent.brainMultipliers.relationship = multipliers;
 }
