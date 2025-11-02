@@ -40,15 +40,21 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof agent.brain.summary.transition.remainingTicks).toBe('number');
     expect(typeof agent.brain.summary.transition.elapsedTicks).toBe('number');
     expect(typeof agent.brain.summary.transition.tickDurationMs).toBe('number');
+    expect(Array.isArray(agent.brain.summary.contextEmbedding)).toBe(true);
+    expect(Array.isArray(agent.brain.summary.nodeEmbedding)).toBe(true);
     expect(Array.isArray(agent.brain.summary.traitFlags)).toBe(true);
     expect(Array.isArray(agent.brain.summary.tags)).toBe(true);
     expect(agent.brain.state.brainId).toBe(agent.brain.summary.brainId);
     expect(agent.brain.state.currentNodeId).toBe(agent.brain.summary.nodeId);
     expect(typeof agent.brain.state.plasticity.tick).toBe('number');
     expect(typeof agent.brain.state.plasticity.edges).toBe('object');
+    expect(Array.isArray(agent.brain.state.contextEmbedding)).toBe(true);
+    expect(Array.isArray(agent.brain.state.pendingContextEmbedding)).toBe(true);
     expect(agent.brain.plasticity).toBeTruthy();
     expect(typeof agent.brain.plasticity.tick).toBe('number');
     expect(Array.isArray(agent.brain.plasticity.edges)).toBe(true);
+    expect(Array.isArray(agent.brain.contextEmbedding)).toBe(true);
+    expect(Array.isArray(agent.brain.nodeEmbedding)).toBe(true);
     for (const edge of agent.brain.plasticity.edges) {
       expect(typeof edge.from).toBe('string');
       expect(typeof edge.to).toBe('string');
@@ -70,6 +76,12 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof house.authority).toBe('number');
     expect(house.brain.summary.brainId).toBeTruthy();
     expect(house.brain.summary.transition).toBeTruthy();
+    expect(Array.isArray(house.brain.summary.contextEmbedding)).toBe(true);
+    expect(Array.isArray(house.brain.summary.nodeEmbedding)).toBe(true);
+    expect(Array.isArray(house.brain.contextEmbedding)).toBe(true);
+    expect(Array.isArray(house.brain.nodeEmbedding)).toBe(true);
+    expect(Array.isArray(house.brain.state.contextEmbedding)).toBe(true);
+    expect(Array.isArray(house.brain.state.pendingContextEmbedding)).toBe(true);
     expect(house.brain.plasticity).toBeTruthy();
     expect(typeof house.brain.plasticity.tick).toBe('number');
     expect(Array.isArray(house.brain.plasticity.edges)).toBe(true);
@@ -81,6 +93,12 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(snapshot.city.brain.summary.brainId).toBeTruthy();
     expect(typeof snapshot.city.demandExpiresAt).toBe('number');
     expect(snapshot.city.brain.summary.transition).toBeTruthy();
+    expect(Array.isArray(snapshot.city.brain.summary.contextEmbedding)).toBe(true);
+    expect(Array.isArray(snapshot.city.brain.summary.nodeEmbedding)).toBe(true);
+    expect(Array.isArray(snapshot.city.brain.contextEmbedding)).toBe(true);
+    expect(Array.isArray(snapshot.city.brain.nodeEmbedding)).toBe(true);
+    expect(Array.isArray(snapshot.city.brain.state.contextEmbedding)).toBe(true);
+    expect(Array.isArray(snapshot.city.brain.state.pendingContextEmbedding)).toBe(true);
     expect(snapshot.city.brain.plasticity).toBeTruthy();
     expect(typeof snapshot.city.brain.plasticity.tick).toBe('number');
     expect(Array.isArray(snapshot.city.brain.plasticity.edges)).toBe(true);

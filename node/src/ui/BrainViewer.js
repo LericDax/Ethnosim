@@ -159,7 +159,14 @@ function computeDataSignature(data) {
   const plasticityTickPart = Number.isFinite(data?.plasticity?.tick)
     ? Number(data.plasticity.tick).toFixed(0)
     : 'none';
-  return `${nodePart}__${edgePart}__${transientPart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}__${plasticityTickPart}|${plasticityEdgesPart}`;
+  const contextEmbedding = data?.contextEmbedding ?? data?.summary?.contextEmbedding ?? null;
+  const contextPart = Array.isArray(contextEmbedding)
+    ? contextEmbedding
+        .slice(0, 8)
+        .map((value) => Number(value ?? 0).toFixed(3))
+        .join(',')
+    : 'none';
+  return `${nodePart}__${edgePart}__${transientPart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}__${plasticityTickPart}__${contextPart}|${plasticityEdgesPart}`;
 }
 
 function resolveClampValue(viewportClamp, minHeight) {
@@ -240,6 +247,28 @@ export class BrainViewer {
     });
     this.root.appendChild(this.labelEl);
 
+    this.contextOverlay = document.createElement('div');
+    Object.assign(this.contextOverlay.style, {
+      position: 'absolute',
+      top: '36px',
+      left: '12px',
+      fontFamily: '"IBM Plex Mono", monospace',
+      fontSize: '10px',
+      letterSpacing: '0.04em',
+      color: 'rgba(203, 213, 225, 0.85)',
+      background: 'rgba(15, 23, 42, 0.55)',
+      borderRadius: '4px',
+      border: '1px solid rgba(148, 163, 184, 0.3)',
+      padding: '6px 8px',
+      display: 'none',
+      pointerEvents: 'none',
+      whiteSpace: 'pre-wrap',
+      maxWidth: '180px',
+      backdropFilter: 'blur(6px)',
+      textShadow: '0 1px 2px rgba(2, 6, 23, 0.85)',
+    });
+    this.root.appendChild(this.contextOverlay);
+
     this.plasticityLegendEl = document.createElement('div');
     Object.assign(this.plasticityLegendEl.style, {
       position: 'absolute',
@@ -279,6 +308,7 @@ export class BrainViewer {
 
     this._data = null;
     this._dataSignature = 'empty';
+    this._contextEmbedding = [];
     this._orderedNodes = [];
     this._edges = [];
     this._nodePositions = new Map();
@@ -344,6 +374,13 @@ export class BrainViewer {
     const pulses = Array.isArray(data?.pulses) ? data.pulses : [];
     const fillRatios = this._extractFillRatios(data);
     const fillContext = this._nodeFillContext;
+    const contextEmbedding = Array.isArray(data?.contextEmbedding)
+      ? data.contextEmbedding
+      : Array.isArray(data?.summary?.contextEmbedding)
+        ? data.summary.contextEmbedding
+        : Array.isArray(data?.state?.contextEmbedding)
+          ? data.state.contextEmbedding
+          : null;
     this._updateSimulationClock(transition);
     const signatureSource = data
       ? {
@@ -357,6 +394,7 @@ export class BrainViewer {
                   ratios: fillRatios ?? {},
                 }
               : fillRatios ?? undefined,
+          contextEmbedding: contextEmbedding ?? undefined,
         }
       : data;
     const signature = computeDataSignature(signatureSource);
@@ -365,6 +403,8 @@ export class BrainViewer {
       this._applyFillRatios(fillRatios);
       this._updateDecisionState(data?.decision ?? null, transition);
       this._updatePulsesFromDescriptors(pulses, transition);
+      this._contextEmbedding = Array.isArray(contextEmbedding) ? [...contextEmbedding] : [];
+      this._updateContextOverlay(this._contextEmbedding);
       return;
     }
 
@@ -380,6 +420,7 @@ export class BrainViewer {
           transition,
           summary: data.summary ?? null,
           plasticity: data.plasticity ?? null,
+          contextEmbedding: Array.isArray(contextEmbedding) ? [...contextEmbedding] : [],
         }
       : null;
     this.emptyState.style.display = this._data ? 'none' : 'flex';
@@ -406,6 +447,8 @@ export class BrainViewer {
         this.plasticityLegendEl.textContent = this._plasticityLegendDefault;
         this.plasticityLegendEl.style.display = 'none';
       }
+      this._contextEmbedding = [];
+      this._updateContextOverlay(null);
       this._drawBackground();
       return;
     }
@@ -674,6 +717,23 @@ export class BrainViewer {
     }
   }
 
+  _updateContextOverlay(embedding) {
+    if (!this.contextOverlay) {
+      return;
+    }
+    if (!Array.isArray(embedding) || embedding.length === 0) {
+      this.contextOverlay.style.display = 'none';
+      this.contextOverlay.textContent = '';
+      return;
+    }
+    const formatted = embedding
+      .slice(0, 8)
+      .map((value) => Number(value ?? 0).toFixed(2))
+      .join('  ');
+    this.contextOverlay.textContent = `Context\n${formatted}`;
+    this.contextOverlay.style.display = 'block';
+  }
+
   _resolveTickDurationMs(timing) {
     if (timing && Number.isFinite(timing.tickDurationMs) && timing.tickDurationMs > 0) {
       return timing.tickDurationMs;
@@ -842,6 +902,8 @@ export class BrainViewer {
       .filter(Boolean);
 
     this._needsRedraw = true;
+    this._contextEmbedding = Array.isArray(contextEmbedding) ? [...contextEmbedding] : [];
+    this._updateContextOverlay(this._contextEmbedding);
   }
 
   _advancePulses() {
