@@ -902,6 +902,7 @@ export class BrainViewer {
       .filter(Boolean);
 
     this._needsRedraw = true;
+    const contextEmbedding = this._data?.contextEmbedding ?? [];
     this._contextEmbedding = Array.isArray(contextEmbedding) ? [...contextEmbedding] : [];
     this._updateContextOverlay(this._contextEmbedding);
   }
