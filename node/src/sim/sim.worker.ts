@@ -18,7 +18,14 @@ import {
   type MovableAgent,
   type MovementContext,
 } from './engine/move.ts';
-import { clampPosition, createWorld, harvestResource, tickWorldResources, type WorldState } from './engine/world.ts';
+import {
+  clampPosition,
+  createWorld,
+  getResourceStock,
+  harvestResource,
+  tickWorldResources,
+  type WorldState,
+} from './engine/world.ts';
 import { handleReproduction, matchReproductivePartners } from './engine/repro.ts';
 import { createTraitProfile } from './engine/traits.ts';
 import {
@@ -1196,8 +1203,7 @@ function handleAgentResourceActions(
   const nodeId = agent.brain.currentNodeId;
   const canGather = RESOURCE_GATHER_NODES.has(nodeId);
   const house = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
-  const focusType = determineAgentResourceFocus(agent, house, city);
-
+  const focusType = determineAgentResourceFocus(agent, house, city, simulation.world);
   if (canGather && focusType) {
     const carriedTotal = getTotalResourceAmount(agent.carriedResources);
     const capacity = Math.max(0, RESOURCE_CARRY_CAPACITY - carriedTotal);
@@ -1358,6 +1364,7 @@ function determineAgentResourceFocus(
   agent: AgentState,
   house: HouseState | null,
   city: CityState | null,
+  world: WorldState,
 ): ResourceType | null {
   const movementPreference = coerceResourceType(agent.movement?.data?.resourceType);
   const carried = getDominantResource(agent.carriedResources);
@@ -1398,7 +1405,23 @@ function determineAgentResourceFocus(
     return carried.type;
   }
 
+  if (!movementPreference && RESOURCE_GATHER_NODES.has(agent.brain.currentNodeId)) {
+    const available = pickAvailableResourceAt(world, agent.x, agent.y);
+    if (available) {
+      return available;
+    }
+  }
+
   return movementPreference;
+}
+
+function pickAvailableResourceAt(world: WorldState, x: number, y: number): ResourceType | null {
+  for (const type of RESOURCE_TYPES) {
+    if (getResourceStock(world, type, x, y) > 0.05) {
+      return type;
+    }
+  }
+  return null;
 }
 
 function coerceResourceType(value: unknown): ResourceType | null {

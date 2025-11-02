@@ -1,5 +1,5 @@
 import type { SimulationState, AgentState } from '../sim.worker.ts';
-import type { WorldState } from '../engine/world.ts';
+import { createForestResourceAlias, type WorldState } from '../engine/world.ts';
 import {
   HOUSE_CONSTRUCTION_COST,
   cloneLeaderDescriptor,
@@ -170,6 +170,8 @@ export function restoreSimulationState(serialized: SerializedSimulationState): S
 
 function restoreWorld(serialized: SerializedWorldState): WorldState {
   const tileCount = Math.max(1, serialized.width * serialized.height);
+  const resources = restoreWorldResources(serialized, tileCount);
+
   return {
     width: serialized.width,
     height: serialized.height,
@@ -181,7 +183,8 @@ function restoreWorld(serialized: SerializedWorldState): WorldState {
       height: serialized.terrain.height,
       tiles: [...serialized.terrain.tiles],
     },
-    resources: restoreWorldResources(serialized, tileCount),
+    resources,
+    forestResources: createForestResourceAlias(resources.stocks.wood),
   };
 }
 

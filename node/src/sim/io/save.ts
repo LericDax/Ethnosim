@@ -261,6 +261,7 @@ function serializeWorld(world: WorldState): SerializedWorldState {
       tiles: [...world.terrain.tiles],
     },
     resources: serializeWorldResources(world.resources),
+    forestResources: Array.from(world.forestResources),
   };
 }
 
