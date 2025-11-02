@@ -93,6 +93,17 @@ const TRAIT_DEFINITIONS: TraitDefinition[] = [
 
 export const JUMP_EDGE_DEFINITIONS: JumpEdgeDefinition[] = [
   {
+    id: 'infant-fear-scream',
+    sourceTags: ['rest', 'social', 'learn'],
+    targetNodeId: 'FearScream',
+    moodTrigger: 'fear',
+    activationThreshold: 1.1,
+    releaseThreshold: 0.7,
+    cooldownTicks: 6,
+    weight: 1.35,
+    activationChance: 0.95,
+  },
+  {
     id: 'territorial-alarm',
     sourceTags: ['home', 'rest'],
     targetNodeId: 'Patrol',

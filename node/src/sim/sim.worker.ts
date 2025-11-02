@@ -202,6 +202,19 @@ const UNHOUSED_MOOD_KEY = 'unhoused';
 const UNHOUSED_MOOD_INCREASE_RATE = 0.12;
 const UNHOUSED_MOOD_DECAY_RATE = 0.08;
 const UNHOUSED_MOOD_MAX = 3;
+const FEAR_MOOD_KEY = 'fear';
+const ALERT_MOOD_KEY = 'alert';
+const HOSTILITY_NEAR_RADIUS = 7;
+const HOSTILITY_NEAR_RADIUS_SQ = HOSTILITY_NEAR_RADIUS * HOSTILITY_NEAR_RADIUS;
+const HOSTILITY_RIVALRY_THRESHOLD = 0.35;
+const FEAR_INCREASE_BASE = 0.45;
+const FEAR_INCREASE_BIAS_SCALE = 0.75;
+const FEAR_DECAY_RATE = 0.12;
+const ALERT_DECAY_RATE = FEAR_DECAY_RATE * 0.75;
+const FEAR_MOOD_MAX = 3;
+const ALERT_MOOD_MAX = 2;
+const FEAR_ALERT_SCALE = 0.6;
+const FEAR_RESPONSE_EPSILON = 1e-3;
 // Nodes in agent brains that actively harvest resources when present on resource tiles.
 const RESOURCE_GATHER_NODES = new Set<string>(['Gather', 'BuildDwelling']);
 
@@ -1061,6 +1074,7 @@ export function stepSimulationState(simulation: SimulationState): void {
     pendingAssignmentCount: simulation.pendingHouseAssignments.length,
   });
   updateLeadershipLedger(simulation);
+  updateThreatMoods(simulation, agentsById);
 
   let trackedAgentFound = false;
 
@@ -1171,6 +1185,120 @@ function updateHousingMoods(simulation: SimulationState): void {
 
     agent.moods[UNHOUSED_MOOD_KEY] = next;
   }
+}
+
+
+function updateThreatMoods(simulation: SimulationState, agentsById: Map<string, AgentState>): void {
+  if (simulation.agents.length === 0) {
+    return;
+  }
+
+  for (const agent of simulation.agents) {
+    if (!agent.moods) {
+      agent.moods = { [UNHOUSED_MOOD_KEY]: 0 };
+    }
+
+    const threatLevel = computeNearbyHostility(agent, agentsById);
+    const rawCurrentFear = agent.moods[FEAR_MOOD_KEY];
+    const currentFear =
+      Number.isFinite(rawCurrentFear) && (rawCurrentFear as number) > 0
+        ? Math.min(rawCurrentFear as number, FEAR_MOOD_MAX)
+        : 0;
+    const rawCurrentAlert = agent.moods[ALERT_MOOD_KEY];
+    const currentAlert =
+      Number.isFinite(rawCurrentAlert) && (rawCurrentAlert as number) > 0
+        ? Math.min(rawCurrentAlert as number, ALERT_MOOD_MAX)
+        : 0;
+
+    let nextFear = currentFear;
+    if (threatLevel > 0) {
+      const fearBias = clamp01(agent.temperament?.fearBias ?? 0.5);
+      const increment = threatLevel * (FEAR_INCREASE_BASE + fearBias * FEAR_INCREASE_BIAS_SCALE);
+      nextFear = Math.min(FEAR_MOOD_MAX, currentFear + increment);
+    } else if (currentFear > 0) {
+      nextFear = Math.max(0, currentFear - FEAR_DECAY_RATE);
+    }
+
+    let nextAlert = currentAlert;
+    if (threatLevel > 0) {
+      const immediate = threatLevel * (1.2 + (agent.temperament?.fearBias ?? 0) * 0.4);
+      const projected = nextFear * FEAR_ALERT_SCALE;
+      nextAlert = Math.min(ALERT_MOOD_MAX, Math.max(immediate, projected, currentAlert * 0.65));
+    } else if (currentAlert > 0) {
+      nextAlert = Math.max(0, currentAlert - ALERT_DECAY_RATE);
+    }
+
+    const fearDelta = nextFear - currentFear;
+    if (Math.abs(fearDelta) > FEAR_RESPONSE_EPSILON) {
+      const decision = agent.brainDecision ?? agent.brain.lastDecision;
+      if (decision) {
+        const magnitude = Math.min(1, Math.abs(fearDelta));
+        if (magnitude > 0) {
+          registerDecisionOutcome(agent.brain, {
+            category: 'mood',
+            magnitude,
+            sign: fearDelta < 0 ? 1 : -1,
+            fromNodeId: decision.fromNodeId,
+            toNodeId: decision.chosenNodeId,
+            tags: ['threat', 'mood:fear'],
+          });
+        }
+      }
+    }
+
+    agent.moods[FEAR_MOOD_KEY] = nextFear > FEAR_RESPONSE_EPSILON ? nextFear : 0;
+    if (nextAlert > FEAR_RESPONSE_EPSILON) {
+      agent.moods[ALERT_MOOD_KEY] = nextAlert;
+    } else if (ALERT_MOOD_KEY in agent.moods) {
+      delete agent.moods[ALERT_MOOD_KEY];
+    }
+  }
+}
+
+function computeNearbyHostility(
+  agent: AgentState,
+  agentsById: Map<string, AgentState>,
+): number {
+  const relationships = agent.relationships?.weights;
+  if (!relationships) {
+    return 0;
+  }
+
+  let highest = 0;
+  for (const [targetId, weights] of Object.entries(relationships)) {
+    if (!weights) {
+      continue;
+    }
+    const rivalry = Number(weights.rivalry);
+    if (!Number.isFinite(rivalry) || rivalry <= HOSTILITY_RIVALRY_THRESHOLD) {
+      continue;
+    }
+    const target = agentsById.get(targetId);
+    if (!target) {
+      continue;
+    }
+    const dx = target.x - agent.x;
+    const dy = target.y - agent.y;
+    if (dx * dx + dy * dy > HOSTILITY_NEAR_RADIUS_SQ) {
+      continue;
+    }
+    const clampedRivalry = Math.min(Math.max(rivalry, HOSTILITY_RIVALRY_THRESHOLD), 2);
+    const normalized =
+      (clampedRivalry - HOSTILITY_RIVALRY_THRESHOLD) / (2 - HOSTILITY_RIVALRY_THRESHOLD);
+    const stageFactor =
+      target.lifeStage === 'adult'
+        ? 1
+        : target.lifeStage === 'teen'
+          ? 0.85
+          : 0.65;
+    const selfSensitivity =
+      agent.lifeStage === 'baby' ? 1.35 : agent.lifeStage === 'child' ? 1.1 : 1;
+    const perceived = clamp01(normalized * stageFactor * selfSensitivity);
+    if (perceived > highest) {
+      highest = perceived;
+    }
+  }
+  return highest;
 }
 
 

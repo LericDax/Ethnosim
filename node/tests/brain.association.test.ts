@@ -60,3 +60,20 @@ describe('recent association edges', () => {
     expect(dynamicEdge).toBeFalsy();
   });
 });
+
+describe('fear-triggered transitions', () => {
+  it('elevates FearScream when fear mood is intense', () => {
+    const state = createBrainState('BabyMind_v1');
+    state.currentNodeId = 'ObserveVoices';
+    state.nodeTimer = 0;
+
+    const result = tickBrain(state, {}, { fear: 1.25, alert: 0.9 });
+
+    expect(result.decision).toBeTruthy();
+    const decision = result.decision;
+    const candidate = decision?.candidates.find((entry) => entry.nodeId === 'FearScream');
+    expect(candidate).toBeTruthy();
+    expect(candidate?.moodMultiplier ?? 0).toBeGreaterThan(1);
+    expect(decision?.chosenNodeId).toBe('FearScream');
+  });
+});
