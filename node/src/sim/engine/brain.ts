@@ -345,6 +345,30 @@ export interface RecentAssociationState {
   decay: number;
 }
 
+export interface BrainMigrationEdgeSnapshot {
+  sourceId: string;
+  targetId: string;
+  state: PlasticityEdgeState;
+}
+
+export interface BrainMigrationAssociationSnapshot {
+  sourceId: string;
+  targetId: string;
+  weight: number;
+  ttl: number;
+  decay: number;
+}
+
+export interface BrainMigrationSeed {
+  sourceBrainId: string;
+  targetBrainId?: string;
+  plasticityTick: number;
+  plasticityEdges: BrainMigrationEdgeSnapshot[];
+  recentAssociations: BrainMigrationAssociationSnapshot[];
+  contextEmbedding?: number[];
+  sourceActiveNodeDuration?: number;
+}
+
 export interface BrainState {
   brainId: string;
   currentNodeId: string;
@@ -1057,10 +1081,10 @@ export function previewBrainCandidates(
   return evaluateCandidates(brain, state, state.currentNodeId, effectiveMultipliers);
 }
 
-export function createBrainState(brainId: string): BrainState {
+export function createBrainState(brainId: string, seed?: BrainMigrationSeed): BrainState {
   const brain = requireBrain(brainId);
   const startNode = requireNode(brain, brain.startNodeId);
-  return {
+  const state: BrainState = {
     brainId,
     currentNodeId: startNode.id,
     nodeTimer: startNode.duration,
@@ -1079,6 +1103,245 @@ export function createBrainState(brainId: string): BrainState {
     contextEmbedding: createZeroEmbedding(),
     pendingContextEmbedding: createZeroEmbedding(),
   };
+  if (seed) {
+    migrateBrainStateFromSeed(state, brain, startNode, seed);
+  }
+  return state;
+}
+
+function migrateBrainStateFromSeed(
+  state: BrainState,
+  targetBrain: BrainGraphRuntime,
+  startNode: BrainNodeMetadata,
+  seed: BrainMigrationSeed,
+): void {
+  if (Array.isArray(seed.contextEmbedding) && seed.contextEmbedding.length > 0) {
+    const normalized = normalizeEmbedding(coerceEmbedding(seed.contextEmbedding));
+    if (!isZeroEmbedding(normalized)) {
+      state.contextEmbedding = normalized;
+    }
+  }
+
+  const durationScale = computeDurationScale(seed.sourceActiveNodeDuration, startNode.duration);
+  const scaledTick = scaleTimer(seed.plasticityTick, durationScale);
+  state.plasticity.tick = scaledTick;
+
+  const sourceBrain = seed.sourceBrainId ? BRAIN_LIBRARY[seed.sourceBrainId] : null;
+  if (!sourceBrain) {
+    return;
+  }
+
+  const nodeMapping = buildMigrationNodeMapping(sourceBrain, targetBrain);
+  applyPlasticitySeed(state, seed, nodeMapping, durationScale, targetBrain.startNodeId);
+  applyAssociationSeed(state, seed, nodeMapping, durationScale, targetBrain.startNodeId);
+}
+
+type MigrationNodeMapping = Map<string, string>;
+
+function buildMigrationNodeMapping(
+  sourceBrain: BrainGraphRuntime,
+  targetBrain: BrainGraphRuntime,
+): MigrationNodeMapping {
+  const mapping: MigrationNodeMapping = new Map();
+  const targetIds = Array.from(targetBrain.nodes.keys()).sort();
+  const fallbackId = targetBrain.startNodeId;
+
+  for (const sourceId of sourceBrain.nodes.keys()) {
+    if (targetBrain.nodes.has(sourceId)) {
+      mapping.set(sourceId, sourceId);
+    }
+  }
+
+  const sourceIds = Array.from(sourceBrain.nodes.keys()).sort();
+  for (const sourceId of sourceIds) {
+    if (mapping.has(sourceId)) {
+      continue;
+    }
+    const sourceNode = sourceBrain.nodes.get(sourceId);
+    if (!sourceNode) {
+      continue;
+    }
+    let bestTargetId: string | null = null;
+    let bestScore = -Infinity;
+    for (const targetId of targetIds) {
+      const targetNode = targetBrain.nodes.get(targetId);
+      if (!targetNode) {
+        continue;
+      }
+      const score = scoreNodeSimilarity(sourceNode, targetNode);
+      if (score > bestScore || (score === bestScore && targetId < (bestTargetId ?? targetId))) {
+        bestScore = score;
+        bestTargetId = targetId;
+      }
+    }
+    mapping.set(sourceId, bestTargetId ?? fallbackId);
+  }
+
+  return mapping;
+}
+
+function scoreNodeSimilarity(a: BrainNodeMetadata, b: BrainNodeMetadata): number {
+  let overlap = 0;
+  const tagSet = new Set(a.tags);
+  for (const tag of b.tags) {
+    if (tagSet.has(tag)) {
+      overlap += 1;
+    }
+  }
+  const frequencyAffinity = 1 / (1 + Math.abs(a.baseFrequency - b.baseFrequency));
+  return overlap > 0 ? overlap * 10 + frequencyAffinity : frequencyAffinity;
+}
+
+function applyPlasticitySeed(
+  state: BrainState,
+  seed: BrainMigrationSeed,
+  mapping: MigrationNodeMapping,
+  durationScale: number,
+  fallbackNodeId: string,
+): void {
+  if (!Array.isArray(seed.plasticityEdges)) {
+    return;
+  }
+
+  for (const entry of seed.plasticityEdges) {
+    if (!entry || !entry.sourceId || !entry.targetId) {
+      continue;
+    }
+    const mappedSource = mapping.get(entry.sourceId) ?? fallbackNodeId;
+    const mappedTarget = mapping.get(entry.targetId) ?? fallbackNodeId;
+    if (!mappedSource || !mappedTarget) {
+      continue;
+    }
+
+    const adjustment = clampToUnit(entry.state.adjustment);
+    if (Math.abs(adjustment) < 1e-6) {
+      continue;
+    }
+
+    let targetMap = state.plasticity.edges.get(mappedSource);
+    if (!targetMap) {
+      targetMap = new Map();
+      state.plasticity.edges.set(mappedSource, targetMap);
+    }
+
+    const scaledUsage = Math.max(1, Math.round(entry.state.usageCount ?? 1));
+    const relativeDecay = entry.state.nextDecayTick - seed.plasticityTick;
+    const scaledDecayOffset = scaleTimer(relativeDecay, durationScale);
+    const nextDecayTick = state.plasticity.tick + scaledDecayOffset;
+
+    const existing = targetMap.get(mappedTarget);
+    if (existing) {
+      existing.adjustment = clampToUnit(existing.adjustment + adjustment);
+      existing.usageCount = Math.max(existing.usageCount, scaledUsage);
+      existing.nextDecayTick = Math.max(existing.nextDecayTick, nextDecayTick);
+    } else {
+      targetMap.set(mappedTarget, {
+        adjustment,
+        usageCount: scaledUsage,
+        nextDecayTick: Math.max(0, nextDecayTick),
+      });
+    }
+  }
+
+  for (const [sourceId, targetMap] of state.plasticity.edges.entries()) {
+    for (const [targetId, edge] of targetMap.entries()) {
+      if (!Number.isFinite(edge.adjustment) || Math.abs(edge.adjustment) < 1e-6) {
+        targetMap.delete(targetId);
+      }
+    }
+    if (targetMap.size === 0) {
+      state.plasticity.edges.delete(sourceId);
+    }
+  }
+}
+
+function applyAssociationSeed(
+  state: BrainState,
+  seed: BrainMigrationSeed,
+  mapping: MigrationNodeMapping,
+  durationScale: number,
+  fallbackNodeId: string,
+): void {
+  if (!Array.isArray(seed.recentAssociations)) {
+    return;
+  }
+
+  for (const association of seed.recentAssociations) {
+    if (!association || !association.sourceId || !association.targetId) {
+      continue;
+    }
+    const mappedSource = mapping.get(association.sourceId) ?? fallbackNodeId;
+    const mappedTarget = mapping.get(association.targetId) ?? fallbackNodeId;
+    if (!mappedSource || !mappedTarget) {
+      continue;
+    }
+
+    const ttl = Math.max(1, Math.min(RECENT_ASSOCIATION_TTL, scaleTimer(association.ttl, durationScale)));
+    const weight = clampAssociationWeight(association.weight);
+    const decay = clampAssociationDecay(association.decay);
+    const key = makeEdgeKey(mappedSource, mappedTarget);
+    const existing = state.recentAssociations.get(key);
+    if (existing) {
+      existing.weight = Math.max(existing.weight, weight);
+      existing.ttl = Math.max(existing.ttl, ttl);
+      existing.decay = Math.min(existing.decay, decay);
+    } else {
+      state.recentAssociations.set(key, {
+        sourceId: mappedSource,
+        targetId: mappedTarget,
+        weight,
+        ttl,
+        decay,
+      });
+    }
+  }
+}
+
+function computeDurationScale(sourceDuration: number | undefined, targetDuration: number): number {
+  if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+    return 1;
+  }
+  if (!Number.isFinite(sourceDuration) || (sourceDuration ?? 0) <= 0) {
+    return 1;
+  }
+  const ratio = targetDuration / (sourceDuration ?? targetDuration);
+  return ratio > 0 ? ratio : 1;
+}
+
+function scaleTimer(value: number, scale: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const scaled = Math.round(value * (Number.isFinite(scale) && scale > 0 ? scale : 1));
+  return scaled >= 0 ? scaled : 0;
+}
+
+function clampToUnit(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (value > 1) {
+    return 1;
+  }
+  if (value < -1) {
+    return -1;
+  }
+  return value;
+}
+
+function clampAssociationWeight(value: number): number {
+  if (!Number.isFinite(value)) {
+    return RECENT_ASSOCIATION_MIN_WEIGHT;
+  }
+  const clamped = Math.max(RECENT_ASSOCIATION_MIN_WEIGHT, Math.min(RECENT_ASSOCIATION_MAX_WEIGHT, value));
+  return clamped;
+}
+
+function clampAssociationDecay(value: number): number {
+  if (!Number.isFinite(value) || value <= 0 || value >= 1) {
+    return RECENT_ASSOCIATION_DECAY;
+  }
+  return value;
 }
 
 export function serializeBrainState(state: BrainState): SerializedBrainState {
