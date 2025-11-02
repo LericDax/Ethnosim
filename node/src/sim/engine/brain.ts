@@ -84,6 +84,184 @@ type JumpEdgeCooldownMap = Record<string, number>;
 
 const LOW_MULTIPLIER_FAILURE_THRESHOLD = 0.35;
 
+export type DecisionOutcomeCategory = 'resource' | 'mood' | 'directive';
+
+export interface DecisionOutcomeBrainTuning {
+  baseReward?: number;
+  nodeScales?: Record<string, number>;
+  tagScales?: Record<string, number>;
+}
+
+export interface DecisionOutcomeTuning {
+  baseReward: number;
+  nodeScales?: Record<string, number>;
+  tagScales?: Record<string, number>;
+  perBrain?: Record<string, DecisionOutcomeBrainTuning>;
+}
+
+interface ResolvedDecisionOutcomeTuning {
+  baseReward: number;
+  nodeScales: Record<string, number>;
+  tagScales: Record<string, number>;
+}
+
+export const DECISION_OUTCOME_TUNING: Record<DecisionOutcomeCategory, DecisionOutcomeTuning> = {
+  resource: {
+    baseReward: 1,
+  },
+  mood: {
+    baseReward: 0.6,
+  },
+  directive: {
+    baseReward: 0.8,
+  },
+};
+
+export interface DecisionOutcomeOptions {
+  category: DecisionOutcomeCategory;
+  magnitude?: number;
+  fromNodeId?: string | null;
+  toNodeId?: string | null;
+  sign?: number;
+  rewardOverride?: number;
+  tags?: string[];
+}
+
+function resolveDecisionOutcomeTuning(
+  category: DecisionOutcomeCategory,
+  brainId: string,
+): ResolvedDecisionOutcomeTuning | null {
+  const base = DECISION_OUTCOME_TUNING[category];
+  if (!base) {
+    return null;
+  }
+
+  const overrides = base.perBrain?.[brainId];
+  const baseReward =
+    typeof overrides?.baseReward === 'number' && Number.isFinite(overrides.baseReward)
+      ? overrides.baseReward
+      : base.baseReward;
+
+  const nodeScales: Record<string, number> = { ...(base.nodeScales ?? {}) };
+  if (overrides?.nodeScales) {
+    Object.assign(nodeScales, overrides.nodeScales);
+  }
+
+  const tagScales: Record<string, number> = { ...(base.tagScales ?? {}) };
+  if (overrides?.tagScales) {
+    Object.assign(tagScales, overrides.tagScales);
+  }
+
+  return {
+    baseReward,
+    nodeScales,
+    tagScales,
+  };
+}
+
+function resolveNodeScale(nodeId: string | null, tuning: ResolvedDecisionOutcomeTuning): number {
+  if (!nodeId) {
+    return 1;
+  }
+  const value = tuning.nodeScales[nodeId];
+  return Number.isFinite(value) ? value : 1;
+}
+
+function resolveTagScale(tag: string, tuning: ResolvedDecisionOutcomeTuning): number {
+  const value = tuning.tagScales[tag];
+  return Number.isFinite(value) ? value : 1;
+}
+
+export function registerDecisionOutcome(state: BrainState, options: DecisionOutcomeOptions): void {
+  if (!state || !options) {
+    return;
+  }
+
+  const tuning = resolveDecisionOutcomeTuning(options.category, state.brainId);
+  if (!tuning) {
+    return;
+  }
+
+  const fallbackDecision = state.lastDecision;
+  const sourceNodeId = options.fromNodeId ?? fallbackDecision?.fromNodeId ?? null;
+  const targetNodeId = options.toNodeId ?? fallbackDecision?.chosenNodeId ?? null;
+  if (!sourceNodeId || !targetNodeId) {
+    return;
+  }
+
+  const rawBaseReward = options.rewardOverride ?? tuning.baseReward;
+  if (!Number.isFinite(rawBaseReward) || rawBaseReward === 0) {
+    return;
+  }
+
+  const magnitude =
+    typeof options.magnitude === 'number' && Number.isFinite(options.magnitude)
+      ? Math.max(0, Math.abs(options.magnitude))
+      : 1;
+  if (magnitude === 0) {
+    return;
+  }
+
+  const baseSign = Math.sign(rawBaseReward) || 1;
+  const requestedSign = Number.isFinite(options.sign ?? NaN) ? Math.sign(options.sign!) : baseSign;
+  const sign = requestedSign === 0 ? baseSign : requestedSign;
+
+  const brain = requireBrain(state.brainId);
+  const sourceNode = brain.nodes.get(sourceNodeId) ?? null;
+  const targetNode = brain.nodes.get(targetNodeId) ?? null;
+
+  const nodeScale = resolveNodeScale(sourceNodeId, tuning) * resolveNodeScale(targetNodeId, tuning);
+  if (!Number.isFinite(nodeScale) || nodeScale === 0) {
+    return;
+  }
+
+  const tags = new Set<string>();
+  if (sourceNode) {
+    for (const tag of sourceNode.tags) {
+      if (tag) {
+        tags.add(tag);
+      }
+    }
+  }
+  if (targetNode) {
+    for (const tag of targetNode.tags) {
+      if (tag) {
+        tags.add(tag);
+      }
+    }
+  }
+  if (Array.isArray(options.tags)) {
+    for (const tag of options.tags) {
+      if (typeof tag === 'string' && tag.length > 0) {
+        tags.add(tag);
+      }
+    }
+  }
+
+  let tagScale = 1;
+  for (const tag of tags) {
+    const scale = resolveTagScale(tag, tuning);
+    if (!Number.isFinite(scale) || scale === 0) {
+      continue;
+    }
+    tagScale *= scale;
+  }
+
+  const totalScale = nodeScale * tagScale;
+  if (!Number.isFinite(totalScale) || totalScale === 0) {
+    return;
+  }
+
+  let reward = Math.abs(rawBaseReward) * magnitude * totalScale;
+  reward *= sign;
+
+  if (!Number.isFinite(reward) || reward === 0) {
+    return;
+  }
+
+  registerPlasticityOutcome(state.plasticity, sourceNodeId, targetNodeId, reward);
+}
+
 export interface BrainDecisionFactor {
   nodeId: string;
   desirability: number;

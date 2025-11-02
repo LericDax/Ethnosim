@@ -2,6 +2,7 @@ import { createModeAwareRngSuite, type SeededRng, type RngStream } from './engin
 import {
   createBrainState,
   tickBrain,
+  registerDecisionOutcome,
   type BrainState,
   type BrainDecision,
   type BrainMultiplierSet,
@@ -1132,6 +1133,23 @@ function updateHousingMoods(simulation: SimulationState): void {
       next = Math.max(0, current - UNHOUSED_MOOD_DECAY_RATE);
     }
 
+    if (next !== current) {
+      const decision = agent.brainDecision ?? agent.brain.lastDecision;
+      if (decision) {
+        const magnitude = Math.min(1, Math.abs(next - current) / Math.max(1, UNHOUSED_MOOD_MAX));
+        if (magnitude > 0) {
+          registerDecisionOutcome(agent.brain, {
+            category: 'mood',
+            magnitude,
+            sign: next < current ? 1 : -1,
+            fromNodeId: decision.fromNodeId,
+            toNodeId: decision.chosenNodeId,
+            tags: ['housing', 'mood:housing'],
+          });
+        }
+      }
+    }
+
     agent.moods[UNHOUSED_MOOD_KEY] = next;
   }
 }
@@ -1204,6 +1222,26 @@ function handleAgentResourceActions(
   const canGather = RESOURCE_GATHER_NODES.has(nodeId);
   const house = agent.houseId ? houseMap.get(agent.houseId) ?? null : null;
   const focusType = determineAgentResourceFocus(agent, house, city, simulation.world);
+  const activeDecision = agent.brainDecision ?? agent.brain.lastDecision;
+
+  const rewardDelivery = (amount: number, type: ResourceType): void => {
+    if (!activeDecision) {
+      return;
+    }
+    const normalized = Math.min(1, Math.abs(amount) / Math.max(1, RESOURCE_CARRY_CAPACITY));
+    if (normalized <= 0) {
+      return;
+    }
+    registerDecisionOutcome(agent.brain, {
+      category: 'resource',
+      magnitude: normalized,
+      sign: amount >= 0 ? 1 : -1,
+      fromNodeId: activeDecision.fromNodeId,
+      toNodeId: activeDecision.chosenNodeId,
+      tags: ['resource', `resource:${type}`, 'delivery'],
+    });
+  };
+
   if (canGather && focusType) {
     const carriedTotal = getTotalResourceAmount(agent.carriedResources);
     const capacity = Math.max(0, RESOURCE_CARRY_CAPACITY - carriedTotal);
@@ -1245,6 +1283,7 @@ function handleAgentResourceActions(
       if (removed > 0) {
         applyHouseDelivery(house, type, removed);
         recordAgentResourceActivity(agent, 'delivered', type, removed);
+        rewardDelivery(removed, type);
         delivered = true;
       }
     }
@@ -1264,6 +1303,7 @@ function handleAgentResourceActions(
       if (removed > 0) {
         applyCityDelivery(city, type, removed);
         recordAgentResourceActivity(agent, 'delivered', type, removed);
+        rewardDelivery(removed, type);
         delivered = true;
       }
     }
