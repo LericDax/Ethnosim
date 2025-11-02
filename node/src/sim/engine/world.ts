@@ -24,6 +24,27 @@ export interface WorldState {
   climateSeed: number;
   terrain: TerrainLayer;
   resources: WorldResourceLayers;
+  /**
+   * @deprecated Use {@link WorldState.resources.stocks.wood} instead. This view is
+   * retained for backwards compatibility with older save formats and tests.
+   */
+  forestResources: Float32Array;
+}
+
+export function createForestResourceAlias(source: Float32Array): Float32Array {
+  return new Float32Array(source.buffer, source.byteOffset, source.length);
+}
+
+export function syncForestResourceAlias(world: WorldState): void {
+  const woodStocks = world.resources.stocks.wood;
+  const alias = world.forestResources;
+  if (
+    alias.buffer !== woodStocks.buffer ||
+    alias.byteOffset !== woodStocks.byteOffset ||
+    alias.length !== woodStocks.length
+  ) {
+    world.forestResources = createForestResourceAlias(woodStocks);
+  }
 }
 
 const TERRAIN_ZONES: Array<{ type: TerrainType; radius: number }> = [
@@ -71,15 +92,20 @@ export function createWorld(width: number, height: number, stream: RngStream): W
     }
   }
 
-  return {
+  const resources: WorldResourceLayers = { stocks, capacities, regenRates, depletion };
+
+  const world: WorldState = {
     width: safeWidth,
     height: safeHeight,
     centerX,
     centerY,
     climateSeed: stream.nextFloat(),
     terrain: { width: safeWidth, height: safeHeight, tiles },
-    resources: { stocks, capacities, regenRates, depletion },
+    resources,
+    forestResources: createForestResourceAlias(stocks.wood),
   };
+
+  return world;
 }
 
 function classifyTerrain(distanceRatio: number): TerrainType {
@@ -314,6 +340,8 @@ export function tickWorldResources(world: WorldState): void {
       }
     }
   }
+
+  syncForestResourceAlias(world);
 }
 
 function resolveTileIndex(world: WorldState, x: number, y: number): number {
