@@ -46,6 +46,15 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(agent.brain.state.currentNodeId).toBe(agent.brain.summary.nodeId);
     expect(typeof agent.brain.state.plasticity.tick).toBe('number');
     expect(typeof agent.brain.state.plasticity.edges).toBe('object');
+    expect(agent.brain.plasticity).toBeTruthy();
+    expect(typeof agent.brain.plasticity.tick).toBe('number');
+    expect(Array.isArray(agent.brain.plasticity.edges)).toBe(true);
+    for (const edge of agent.brain.plasticity.edges) {
+      expect(typeof edge.from).toBe('string');
+      expect(typeof edge.to).toBe('string');
+      expect(typeof edge.adjustment).toBe('number');
+      expect(typeof edge.usageCount).toBe('number');
+    }
     expect(typeof agent.pregnant).toBe('boolean');
     expect(agent.temperament).toBeTruthy();
     expect(typeof agent.temperament.trustBias).toBe('number');
@@ -61,6 +70,9 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(typeof house.authority).toBe('number');
     expect(house.brain.summary.brainId).toBeTruthy();
     expect(house.brain.summary.transition).toBeTruthy();
+    expect(house.brain.plasticity).toBeTruthy();
+    expect(typeof house.brain.plasticity.tick).toBe('number');
+    expect(Array.isArray(house.brain.plasticity.edges)).toBe(true);
   }
 
   if (snapshot.city) {
@@ -69,6 +81,9 @@ function assertSnapshotMatchesSharedContract(snapshot: ReturnType<typeof createS
     expect(snapshot.city.brain.summary.brainId).toBeTruthy();
     expect(typeof snapshot.city.demandExpiresAt).toBe('number');
     expect(snapshot.city.brain.summary.transition).toBeTruthy();
+    expect(snapshot.city.brain.plasticity).toBeTruthy();
+    expect(typeof snapshot.city.brain.plasticity.tick).toBe('number');
+    expect(Array.isArray(snapshot.city.brain.plasticity.edges)).toBe(true);
   }
 
   for (const decision of snapshot.decisions) {

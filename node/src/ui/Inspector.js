@@ -238,12 +238,63 @@ export class Inspector {
       width: '100%',
       flex: '1 0 auto',
       boxSizing: 'border-box',
+      flexDirection: 'column',
+      gap: '12px',
     });
     this.brainViewer = new BrainViewer({
       minHeight: 220,
       viewportClamp: { min: 220, viewport: 55, max: 420 },
     });
     this.brainSection.content.appendChild(this.brainViewer.element);
+    this.brainPlasticityContainer = document.createElement('div');
+    Object.assign(this.brainPlasticityContainer.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '8px',
+      borderRadius: '6px',
+      background: 'rgba(15, 23, 42, 0.55)',
+      border: '1px solid rgba(148, 163, 184, 0.25)',
+      fontFamily: 'Inter, system-ui, sans-serif',
+      color: 'rgba(226, 232, 240, 0.9)',
+      fontSize: '12px',
+    });
+    this.brainPlasticityHeading = document.createElement('div');
+    this.brainPlasticityHeading.textContent = 'Plasticity Adjustments';
+    Object.assign(this.brainPlasticityHeading.style, {
+      fontSize: '12px',
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      color: 'rgba(224, 242, 254, 0.85)',
+    });
+    this.brainPlasticityLegend = document.createElement('div');
+    this.brainPlasticityLegend.textContent = 'Teal edges are potentiated; rose edges are suppressed.';
+    Object.assign(this.brainPlasticityLegend.style, {
+      fontSize: '11px',
+      color: 'rgba(148, 163, 184, 0.8)',
+    });
+    this.brainPlasticityLegendDefault = this.brainPlasticityLegend.textContent;
+    this.brainPlasticityList = document.createElement('div');
+    Object.assign(this.brainPlasticityList.style, {
+      display: 'grid',
+      gridTemplateColumns: 'minmax(0, 1fr) minmax(0, auto) minmax(0, auto)',
+      gap: '4px 12px',
+      fontFamily: '"IBM Plex Mono", monospace',
+      fontSize: '11px',
+      color: 'rgba(226, 232, 240, 0.92)',
+    });
+    this.brainPlasticityEmpty = document.createElement('div');
+    this.brainPlasticityEmpty.textContent = 'No active adjustments';
+    Object.assign(this.brainPlasticityEmpty.style, {
+      fontSize: '11px',
+      color: 'rgba(148, 163, 184, 0.75)',
+    });
+    this.brainPlasticityContainer.appendChild(this.brainPlasticityHeading);
+    this.brainPlasticityContainer.appendChild(this.brainPlasticityLegend);
+    this.brainPlasticityContainer.appendChild(this.brainPlasticityList);
+    this.brainPlasticityContainer.appendChild(this.brainPlasticityEmpty);
+    this.brainPlasticityEmpty.style.display = 'none';
+    this.brainSection.content.appendChild(this.brainPlasticityContainer);
     this.brainSection.root.style.display = 'none';
 
     this.identitySection = this._createInfoSection('Identity');
@@ -645,17 +696,199 @@ export class Inspector {
     const nodeFill =
       (brainData && typeof brainData.nodeFill === 'object' ? brainData.nodeFill : null) ??
       (brainData && typeof brainData.fillRatios === 'object' ? brainData.fillRatios : null);
+    const plasticitySnapshot = this._resolvePlasticitySnapshot(brainData);
+    const viewerEdges = this._buildViewerEdges(graph, plasticitySnapshot.edges);
 
     this.brainViewer.setData({
       nodes: graph.nodes.map((node) => ({ ...node })),
-      edges: graph.edges.map((edge) => ({ ...edge })),
+      edges: viewerEdges,
       currentNodeId,
       decision,
       transition: summary?.transition ?? null,
       pulses,
       nodeFill,
+      plasticity: plasticitySnapshot,
     });
+    this._updatePlasticityDetails(plasticitySnapshot);
     this.brainSection.root.style.display = 'flex';
+  }
+
+  _resolvePlasticitySnapshot(brainData) {
+    const snapshot = { tick: 0, edges: [] };
+    if (!brainData || typeof brainData !== 'object') {
+      return snapshot;
+    }
+
+    const direct = brainData.plasticity;
+    const fallback = brainData.state?.plasticity ?? null;
+    const edges = [];
+
+    if (direct && Array.isArray(direct.edges)) {
+      const tick = Number(direct.tick);
+      snapshot.tick = Number.isFinite(tick) ? tick : Number(fallback?.tick ?? snapshot.tick);
+      for (const entry of direct.edges) {
+        const normalized = this._normalizePlasticityEntry(entry?.from, entry?.to, entry);
+        if (normalized) {
+          edges.push(normalized);
+        }
+      }
+    } else if (fallback && typeof fallback === 'object') {
+      const tick = Number(fallback.tick);
+      snapshot.tick = Number.isFinite(tick) ? tick : snapshot.tick;
+      const records = fallback.edges ?? {};
+      for (const [fromId, targets] of Object.entries(records)) {
+        if (!targets || typeof targets !== 'object') {
+          continue;
+        }
+        for (const [toId, entry] of Object.entries(targets)) {
+          const normalized = this._normalizePlasticityEntry(fromId, toId, entry);
+          if (normalized) {
+            edges.push(normalized);
+          }
+        }
+      }
+    }
+
+    edges.sort((a, b) => {
+      const diff = Math.abs(b.adjustment) - Math.abs(a.adjustment);
+      if (Math.abs(diff) > 1e-6) {
+        return diff;
+      }
+      const fromCompare = a.from.localeCompare(b.from);
+      if (fromCompare !== 0) {
+        return fromCompare;
+      }
+      return a.to.localeCompare(b.to);
+    });
+
+    snapshot.edges = edges;
+    return snapshot;
+  }
+
+  _normalizePlasticityEntry(fromId, toId, entry) {
+    if (!fromId || !toId) {
+      return null;
+    }
+    const adjustment = Number(entry?.adjustment ?? 0);
+    if (!Number.isFinite(adjustment) || Math.abs(adjustment) < 1e-6) {
+      return null;
+    }
+    const usageCount = Number(entry?.usageCount ?? 0);
+    const nextDecayTick = Number(entry?.nextDecayTick ?? 0);
+    return {
+      from: String(fromId),
+      to: String(toId),
+      adjustment,
+      usageCount: Number.isFinite(usageCount) ? usageCount : 0,
+      nextDecayTick: Number.isFinite(nextDecayTick) ? nextDecayTick : 0,
+    };
+  }
+
+  _buildViewerEdges(graph, plasticityEdges) {
+    const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    const edges = Array.isArray(graph.edges) ? graph.edges : [];
+    const nodeSet = new Set(nodes.map((node) => node.id));
+    const adjustmentMap = new Map();
+    for (const entry of plasticityEdges) {
+      const key = `${entry.from}->${entry.to}`;
+      adjustmentMap.set(key, entry);
+    }
+
+    const viewerEdges = edges.map((edge) => {
+      const key = `${edge.from}->${edge.to}`;
+      const adjustment = adjustmentMap.has(key) ? adjustmentMap.get(key).adjustment : 0;
+      const usageCount = adjustmentMap.has(key) ? adjustmentMap.get(key).usageCount : 0;
+      const baseWeight = Number(edge.weight ?? 0) || 0;
+      const weight = Math.max(0, baseWeight + adjustment);
+      adjustmentMap.delete(key);
+      return {
+        ...edge,
+        baseWeight,
+        weight,
+        adjustment,
+        usageCount,
+      };
+    });
+
+    for (const entry of adjustmentMap.values()) {
+      if (!nodeSet.has(entry.from) || !nodeSet.has(entry.to)) {
+        continue;
+      }
+      const baseWeight = 0;
+      const weight = Math.max(0, baseWeight + entry.adjustment);
+      viewerEdges.push({
+        from: entry.from,
+        to: entry.to,
+        weight,
+        baseWeight,
+        adjustment: entry.adjustment,
+        usageCount: entry.usageCount ?? 0,
+      });
+    }
+
+    return viewerEdges;
+  }
+
+  _updatePlasticityDetails(plasticitySnapshot) {
+    if (!this.brainPlasticityContainer) {
+      return;
+    }
+    const edges = Array.isArray(plasticitySnapshot?.edges) ? plasticitySnapshot.edges : [];
+    const legendText = this.brainPlasticityLegendDefault ?? this.brainPlasticityLegend?.textContent ?? '';
+    const tick = Number(plasticitySnapshot?.tick ?? 0);
+
+    if (!edges.length) {
+      this.brainPlasticityContainer.style.display = 'flex';
+      this.brainPlasticityList.style.display = 'none';
+      this.brainPlasticityList.innerHTML = '';
+      this.brainPlasticityEmpty.style.display = 'block';
+      if (this.brainPlasticityLegend) {
+        this.brainPlasticityLegend.textContent = legendText;
+      }
+      this.brainPlasticityContainer.title = 'No active synaptic adjustments recorded.';
+      return;
+    }
+
+    const summaryTick = Number.isFinite(tick) ? Math.max(0, Math.round(tick)) : null;
+    const sorted = edges
+      .slice()
+      .sort((a, b) => Math.abs(b.adjustment) - Math.abs(a.adjustment))
+      .slice(0, 6);
+
+    this.brainPlasticityContainer.style.display = 'flex';
+    this.brainPlasticityList.style.display = 'grid';
+    this.brainPlasticityList.innerHTML = '';
+    this.brainPlasticityEmpty.style.display = 'none';
+
+    for (const entry of sorted) {
+      const edgeLabel = document.createElement('div');
+      edgeLabel.textContent = `${entry.from} → ${entry.to}`;
+      const delta = document.createElement('div');
+      const formatted = `${entry.adjustment >= 0 ? '+' : ''}${entry.adjustment.toFixed(3)}`;
+      delta.textContent = formatted;
+      delta.style.textAlign = 'right';
+      delta.style.color = entry.adjustment >= 0 ? '#38bdf8' : '#fb7185';
+      delta.style.fontWeight = '600';
+      const usage = document.createElement('div');
+      const usageValue = Number.isFinite(entry.usageCount) ? Math.max(0, Math.round(entry.usageCount)) : 0;
+      usage.textContent = `×${usageValue}`;
+      usage.style.textAlign = 'right';
+      usage.style.color = 'rgba(226, 232, 240, 0.75)';
+      const decayTick = Number.isFinite(entry.nextDecayTick) ? entry.nextDecayTick : null;
+      const tooltip = decayTick != null ? `Next decay at tick ${decayTick}` : 'No decay scheduled';
+      edgeLabel.title = tooltip;
+      delta.title = tooltip;
+      usage.title = tooltip;
+      this.brainPlasticityList.appendChild(edgeLabel);
+      this.brainPlasticityList.appendChild(delta);
+      this.brainPlasticityList.appendChild(usage);
+    }
+
+    if (this.brainPlasticityLegend) {
+      this.brainPlasticityLegend.textContent =
+        summaryTick != null ? `${legendText} (tick ${summaryTick})` : legendText;
+    }
+    this.brainPlasticityContainer.title = `${sorted.length} plastic edge adjustments shown.`;
   }
 
   _applyRootStyles() {
