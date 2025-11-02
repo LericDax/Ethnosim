@@ -246,6 +246,54 @@ export class Inspector {
       viewportClamp: { min: 220, viewport: 55, max: 420 },
     });
     this.brainSection.content.appendChild(this.brainViewer.element);
+    this.brainAttentionContainer = document.createElement('div');
+    Object.assign(this.brainAttentionContainer.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '8px',
+      borderRadius: '6px',
+      background: 'rgba(15, 23, 42, 0.55)',
+      border: '1px solid rgba(148, 163, 184, 0.25)',
+      fontFamily: 'Inter, system-ui, sans-serif',
+      color: 'rgba(226, 232, 240, 0.9)',
+      fontSize: '12px',
+    });
+    this.brainAttentionHeading = document.createElement('div');
+    this.brainAttentionHeading.textContent = 'Attention Focus';
+    Object.assign(this.brainAttentionHeading.style, {
+      fontSize: '12px',
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      color: 'rgba(224, 242, 254, 0.85)',
+    });
+    this.brainAttentionContext = document.createElement('div');
+    Object.assign(this.brainAttentionContext.style, {
+      fontFamily: '"IBM Plex Mono", monospace',
+      fontSize: '11px',
+      color: 'rgba(226, 232, 240, 0.85)',
+      whiteSpace: 'pre-wrap',
+    });
+    this.brainAttentionList = document.createElement('div');
+    Object.assign(this.brainAttentionList.style, {
+      display: 'grid',
+      gridTemplateColumns: 'minmax(0, 1fr) minmax(0, auto) minmax(0, auto)',
+      gap: '4px 12px',
+      fontFamily: '"IBM Plex Mono", monospace',
+      fontSize: '11px',
+      color: 'rgba(226, 232, 240, 0.92)',
+    });
+    this.brainAttentionEmpty = document.createElement('div');
+    this.brainAttentionEmpty.textContent = 'No active candidates';
+    Object.assign(this.brainAttentionEmpty.style, {
+      fontSize: '11px',
+      color: 'rgba(148, 163, 184, 0.75)',
+    });
+    this.brainAttentionContainer.appendChild(this.brainAttentionHeading);
+    this.brainAttentionContainer.appendChild(this.brainAttentionContext);
+    this.brainAttentionContainer.appendChild(this.brainAttentionList);
+    this.brainAttentionContainer.appendChild(this.brainAttentionEmpty);
+    this.brainSection.content.appendChild(this.brainAttentionContainer);
     this.brainPlasticityContainer = document.createElement('div');
     Object.assign(this.brainPlasticityContainer.style, {
       display: 'none',
@@ -725,6 +773,9 @@ export class Inspector {
       if (this.brainAssociationsContainer) {
         this.brainAssociationsContainer.style.display = 'none';
       }
+      if (this.brainAttentionContainer) {
+        this.brainAttentionContainer.style.display = 'none';
+      }
       return;
     }
 
@@ -757,8 +808,11 @@ export class Inspector {
       pulses,
       nodeFill,
       plasticity: plasticitySnapshot,
+      contextEmbedding:
+        brainData?.contextEmbedding ?? summary?.contextEmbedding ?? state?.contextEmbedding ?? null,
     });
     this._updatePlasticityDetails(plasticitySnapshot);
+    this._updateAttentionDiagnostics(brainData, graph);
     this._updateRecentAssociationsList(transientEdges, graph);
     this.brainSection.root.style.display = 'flex';
   }
@@ -1006,6 +1060,102 @@ export class Inspector {
       this.brainAssociationsList.appendChild(pairLabel);
       this.brainAssociationsList.appendChild(weightEl);
       this.brainAssociationsList.appendChild(ttlEl);
+    }
+  }
+
+  _updateAttentionDiagnostics(brainData, graph) {
+    if (
+      !this.brainAttentionContainer ||
+      !this.brainAttentionList ||
+      !this.brainAttentionEmpty ||
+      !this.brainAttentionContext
+    ) {
+      return;
+    }
+
+    const contextEmbedding = Array.isArray(brainData?.contextEmbedding)
+      ? brainData.contextEmbedding
+      : Array.isArray(brainData?.summary?.contextEmbedding)
+        ? brainData.summary.contextEmbedding
+        : Array.isArray(brainData?.state?.contextEmbedding)
+          ? brainData.state.contextEmbedding
+          : null;
+    const decision = brainData?.summary?.decision ?? brainData?.state?.lastDecision ?? null;
+    const candidates = Array.isArray(decision?.candidates) ? decision.candidates : [];
+    const hasContext = Array.isArray(contextEmbedding) && contextEmbedding.length > 0;
+    const hasCandidates = candidates.length > 0;
+
+    if (!hasContext && !hasCandidates) {
+      this.brainAttentionContainer.style.display = 'none';
+      this.brainAttentionContext.textContent = 'Context vector unavailable.';
+      this.brainAttentionList.innerHTML = '';
+      this.brainAttentionEmpty.style.display = 'block';
+      return;
+    }
+
+    this.brainAttentionContainer.style.display = 'flex';
+    if (hasContext) {
+      const formatted = contextEmbedding
+        .slice(0, 8)
+        .map((value) => Number(value ?? 0).toFixed(2))
+        .join('  ');
+      this.brainAttentionContext.textContent = `Context ${formatted}`;
+    } else {
+      this.brainAttentionContext.textContent = 'Context vector unavailable.';
+    }
+
+    if (!hasCandidates) {
+      this.brainAttentionList.style.display = 'none';
+      this.brainAttentionEmpty.style.display = 'block';
+      this.brainAttentionList.innerHTML = '';
+      return;
+    }
+
+    const labelMap = new Map();
+    if (graph && Array.isArray(graph.nodes)) {
+      for (const node of graph.nodes) {
+        if (node && node.id) {
+          labelMap.set(node.id, node.label ?? node.id);
+        }
+      }
+    }
+
+    const chosenNodeId = decision?.chosenNodeId ?? null;
+    const sorted = candidates
+      .slice()
+      .sort((a, b) => (Number(b.desirability) || 0) - (Number(a.desirability) || 0))
+      .slice(0, 6);
+
+    this.brainAttentionList.style.display = 'grid';
+    this.brainAttentionEmpty.style.display = 'none';
+    this.brainAttentionList.innerHTML = '';
+
+    for (const candidate of sorted) {
+      const rowLabel = document.createElement('div');
+      const label = labelMap.get(candidate.nodeId) ?? candidate.nodeId;
+      rowLabel.textContent = String(label);
+      if (candidate.nodeId === chosenNodeId) {
+        rowLabel.style.color = '#fde68a';
+        rowLabel.style.fontWeight = '600';
+      }
+
+      const attentionEl = document.createElement('div');
+      const attention = Number.isFinite(candidate.attentionScore)
+        ? Number(candidate.attentionScore)
+        : Number(candidate.totalMultiplier ?? 0);
+      attentionEl.textContent = attention.toFixed(3);
+      attentionEl.style.textAlign = 'right';
+      attentionEl.style.color = '#38bdf8';
+
+      const desirabilityEl = document.createElement('div');
+      const desirability = Number(candidate.desirability);
+      desirabilityEl.textContent = Number.isFinite(desirability) ? desirability.toFixed(3) : '–';
+      desirabilityEl.style.textAlign = 'right';
+      desirabilityEl.style.color = 'rgba(226, 232, 240, 0.85)';
+
+      this.brainAttentionList.appendChild(rowLabel);
+      this.brainAttentionList.appendChild(attentionEl);
+      this.brainAttentionList.appendChild(desirabilityEl);
     }
   }
 

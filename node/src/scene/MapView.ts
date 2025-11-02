@@ -108,11 +108,15 @@ export interface SnapshotBrainData {
     nodeTimer: number;
     nodeDuration: number;
     decision: unknown;
+    contextEmbedding?: number[];
+    nodeEmbedding?: number[];
   } | null;
   state?: {
     brainId?: string;
     currentNodeId?: string;
     lastDecision?: unknown;
+    contextEmbedding?: number[];
+    pendingContextEmbedding?: number[];
   } | null;
   pulses?: Array<{
     edgeId: string;
@@ -120,6 +124,8 @@ export interface SnapshotBrainData {
     strength: number;
   }>;
   fillRatios?: Record<string, number> | null;
+  contextEmbedding?: number[] | null;
+  nodeEmbedding?: number[] | null;
 }
 
 export interface SnapshotLeader {

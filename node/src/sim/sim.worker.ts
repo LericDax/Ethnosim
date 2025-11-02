@@ -201,6 +201,8 @@ interface SnapshotBrainSummary {
   traitFlags: string[];
   baseFrequency: number;
   tags: string[];
+  nodeEmbedding: number[];
+  contextEmbedding: number[];
   transition: SnapshotBrainTransitionTiming | null;
 }
 
@@ -269,6 +271,8 @@ interface SnapshotBrainData {
   nodeFill?: SnapshotBrainFill | null;
   plasticity: SnapshotBrainPlasticity;
   transientEdges: SnapshotTransientEdge[];
+  contextEmbedding: number[];
+  nodeEmbedding: number[];
 }
 
 interface SnapshotAgent {
@@ -2057,6 +2061,8 @@ function createBrainSnapshot(
   const fillRatios = fillInfo?.ratios ?? {};
   const plasticity = extractSnapshotPlasticity(brain);
   const transientEdges = extractSnapshotTransientEdges(brain);
+  const nodeEmbedding = Array.from(metadata.embedding ?? []);
+  const contextEmbedding = Array.from(brain.contextEmbedding ?? []);
   const transition: SnapshotBrainTransitionTiming = {
     durationTicks: safeDurationTicks,
     remainingTicks,
@@ -2077,6 +2083,8 @@ function createBrainSnapshot(
       traitFlags: [...brain.traitFlags],
       baseFrequency: metadata.baseFrequency,
       tags: [...metadata.tags],
+      nodeEmbedding,
+      contextEmbedding,
       transition,
     },
     state: serializeBrainState(brain),
@@ -2085,6 +2093,8 @@ function createBrainSnapshot(
     nodeFill: fillInfo,
     plasticity,
     transientEdges,
+    contextEmbedding,
+    nodeEmbedding,
   };
 }
 

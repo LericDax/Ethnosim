@@ -16,6 +16,18 @@ import {
   type SerializedPlasticityState,
   type SerializedPlasticityEdgeState,
 } from './plasticity.ts';
+import {
+  addScaledEmbedding,
+  cloneEmbedding,
+  combineTagEmbeddings,
+  coerceEmbedding,
+  createZeroEmbedding,
+  dotProduct,
+  embeddingFromTagWeights,
+  isZeroEmbedding,
+  normalizeEmbedding,
+  scaleEmbedding,
+} from './embeddings.ts';
 
 export interface BrainNodeDefinition {
   id: string;
@@ -45,6 +57,7 @@ export interface BrainNodeMetadata {
   chargeCapacity: number;
   chargeLeak: number;
   pulseBudgetScale: number;
+  embedding: ReadonlyArray<number>;
 }
 
 interface BrainEdgeMetadata {
@@ -82,6 +95,8 @@ export interface BrainDecisionFactor {
   personalityMultiplier: number;
   demandMultiplier: number;
   totalMultiplier: number;
+  attentionScore: number;
+  embedding: ReadonlyArray<number>;
   tags: string[];
 }
 
@@ -167,6 +182,8 @@ export interface BrainState {
   recentAssociations: Map<string, RecentAssociationState>;
   pulseEvents: BrainPulseEvent[];
   nextPulseId: number;
+  contextEmbedding: number[];
+  pendingContextEmbedding: number[];
 }
 
 export interface NodeChargeState {
@@ -214,6 +231,8 @@ export interface SerializedBrainState {
   recentAssociations: SerializedRecentAssociationState[];
   pulseEvents: BrainPulseEvent[];
   nextPulseId: number;
+  contextEmbedding: number[];
+  pendingContextEmbedding: number[];
 }
 
 interface SerializedNodeChargeState {
@@ -269,6 +288,15 @@ const RECENT_ASSOCIATION_DECAY = 0.72;
 const RECENT_ASSOCIATION_WEIGHT_SCALE = 1.1;
 const RECENT_ASSOCIATION_MAX_WEIGHT = 1.35;
 const RECENT_ASSOCIATION_MIN_WEIGHT = 0.05;
+const CONTEXT_DECAY = 0.82;
+const PULSE_CONTEXT_WEIGHT = 1;
+const CURRENT_NODE_CONTEXT_WEIGHT = 0.35;
+const MULTIPLIER_CONTEXT_WEIGHT_MOOD = 1;
+const MULTIPLIER_CONTEXT_WEIGHT_PERSONALITY = 0.85;
+const MULTIPLIER_CONTEXT_WEIGHT_DEMAND = 1.15;
+const ATTENTION_GAIN = 0.75;
+const ATTENTION_BLEND = 0.6;
+const MIN_ATTENTION_SCORE = 0.05;
 
 const RAW_BRAINS: BrainGraphDefinition[] = [
   parseBrainJson(babyMindRaw),
@@ -550,17 +578,20 @@ function buildRuntimeGraph(definition: BrainGraphDefinition): BrainGraphRuntime 
     const chargeCapacity = normalizeChargeCapacity(node.charge_capacity);
     const chargeLeak = normalizeChargeLeak(node.charge_leak);
     const pulseBudgetScale = normalizePulseBudgetScale(node.pulse_budget_scale);
+    const tags = Array.isArray(node.tags) ? [...node.tags] : [];
+    const embedding = Object.freeze(combineTagEmbeddings(tags));
     nodes.set(node.id, {
       id: node.id,
       baseFrequency: node.base_freq,
       duration: node.duration,
-      tags: [...node.tags],
+      tags,
       chargeCapacity,
       chargeLeak,
       pulseBudgetScale,
+      embedding,
     });
 
-    for (const tag of node.tags) {
+    for (const tag of tags) {
       if (!nodesByTag.has(tag)) {
         nodesByTag.set(tag, []);
       }
@@ -618,6 +649,161 @@ function productForTags(tags: string[], map?: Record<string, number>): number {
   return product;
 }
 
+function moodLevelToMultiplier(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric === 0) {
+    return 1;
+  }
+  if (numeric > 0) {
+    const capped = Math.min(numeric, 8);
+    return 1 + capped;
+  }
+  const magnitude = Math.min(Math.abs(numeric), 8);
+  return 1 / (1 + magnitude);
+}
+
+function combineMoodMultipliers(
+  base: Record<string, number> | undefined,
+  moodLevels: Record<string, number> | undefined,
+): Record<string, number> | undefined {
+  const combined: Record<string, number> = {};
+  if (base) {
+    for (const [tag, value] of Object.entries(base)) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        continue;
+      }
+      combined[tag] = numeric;
+    }
+  }
+  if (moodLevels) {
+    for (const [tag, value] of Object.entries(moodLevels)) {
+      const multiplier = moodLevelToMultiplier(value);
+      if (!Number.isFinite(multiplier) || Math.abs(multiplier - 1) < 1e-6) {
+        continue;
+      }
+      const existing = combined[tag] ?? 1;
+      combined[tag] = existing * multiplier;
+    }
+  }
+  return Object.keys(combined).length > 0 ? combined : undefined;
+}
+
+function createEffectiveMultipliers(
+  multipliers: BrainMultiplierSet = {},
+  moodLevels: Record<string, number> = {},
+): BrainMultiplierSet {
+  const effective: BrainMultiplierSet = {};
+  const mood = combineMoodMultipliers(multipliers.mood, moodLevels);
+  if (mood) {
+    effective.mood = mood;
+  }
+  if (multipliers.personality) {
+    effective.personality = { ...multipliers.personality };
+  }
+  if (multipliers.demand) {
+    effective.demand = { ...multipliers.demand };
+  }
+  return effective;
+}
+
+function buildMultiplierEmbedding(multipliers: BrainMultiplierSet): number[] {
+  const components: number[][] = [];
+  if (multipliers.mood) {
+    const moodEmbedding = embeddingFromTagWeights(multipliers.mood, MULTIPLIER_CONTEXT_WEIGHT_MOOD);
+    if (!isZeroEmbedding(moodEmbedding)) {
+      components.push(moodEmbedding);
+    }
+  }
+  if (multipliers.personality) {
+    const personalityEmbedding = embeddingFromTagWeights(
+      multipliers.personality,
+      MULTIPLIER_CONTEXT_WEIGHT_PERSONALITY,
+    );
+    if (!isZeroEmbedding(personalityEmbedding)) {
+      components.push(personalityEmbedding);
+    }
+  }
+  if (multipliers.demand) {
+    const demandEmbedding = embeddingFromTagWeights(multipliers.demand, MULTIPLIER_CONTEXT_WEIGHT_DEMAND);
+    if (!isZeroEmbedding(demandEmbedding)) {
+      components.push(demandEmbedding);
+    }
+  }
+
+  if (components.length === 0) {
+    return createZeroEmbedding();
+  }
+
+  const aggregate = createZeroEmbedding();
+  for (const vector of components) {
+    addScaledEmbedding(aggregate, vector, 1);
+  }
+  scaleEmbedding(aggregate, 1 / components.length);
+  return normalizeEmbedding(aggregate);
+}
+
+function updateContextEmbedding(
+  state: BrainState,
+  brain: BrainGraphRuntime,
+  multipliers: BrainMultiplierSet,
+  currentNodeMetadata?: BrainNodeMetadata,
+): void {
+  const base = cloneEmbedding(state.contextEmbedding);
+  if (!isZeroEmbedding(base)) {
+    scaleEmbedding(base, CONTEXT_DECAY);
+  }
+
+  if (!isZeroEmbedding(state.pendingContextEmbedding)) {
+    addScaledEmbedding(base, state.pendingContextEmbedding, PULSE_CONTEXT_WEIGHT);
+  }
+
+  const multiplierEmbedding = buildMultiplierEmbedding(multipliers);
+  if (!isZeroEmbedding(multiplierEmbedding)) {
+    addScaledEmbedding(base, multiplierEmbedding, 1);
+  }
+
+  const currentNode = currentNodeMetadata ?? requireNode(brain, state.currentNodeId);
+  if (currentNode?.embedding && !isZeroEmbedding(currentNode.embedding)) {
+    addScaledEmbedding(base, currentNode.embedding, CURRENT_NODE_CONTEXT_WEIGHT);
+  }
+
+  let next = base;
+  if (isZeroEmbedding(next)) {
+    if (!isZeroEmbedding(multiplierEmbedding)) {
+      next = cloneEmbedding(multiplierEmbedding);
+    } else if (currentNode?.embedding && !isZeroEmbedding(currentNode.embedding)) {
+      next = cloneEmbedding(currentNode.embedding);
+    } else if (!isZeroEmbedding(state.pendingContextEmbedding)) {
+      next = cloneEmbedding(state.pendingContextEmbedding);
+    }
+  }
+
+  state.contextEmbedding = isZeroEmbedding(next) ? createZeroEmbedding() : normalizeEmbedding(next);
+  state.pendingContextEmbedding = createZeroEmbedding();
+}
+
+export function refreshBrainContext(
+  state: BrainState,
+  multipliers: BrainMultiplierSet = {},
+  moodLevels: Record<string, number> = {},
+): void {
+  const brain = requireBrain(state.brainId);
+  const effectiveMultipliers = createEffectiveMultipliers(multipliers, moodLevels);
+  updateContextEmbedding(state, brain, effectiveMultipliers);
+}
+
+export function previewBrainCandidates(
+  state: BrainState,
+  multipliers: BrainMultiplierSet = {},
+  moodLevels: Record<string, number> = {},
+): BrainDecisionFactor[] {
+  const brain = requireBrain(state.brainId);
+  const effectiveMultipliers = createEffectiveMultipliers(multipliers, moodLevels);
+  updateContextEmbedding(state, brain, effectiveMultipliers);
+  return evaluateCandidates(brain, state, state.currentNodeId, effectiveMultipliers);
+}
+
 export function createBrainState(brainId: string): BrainState {
   const brain = requireBrain(brainId);
   const startNode = requireNode(brain, brain.startNodeId);
@@ -637,6 +823,8 @@ export function createBrainState(brainId: string): BrainState {
     recentAssociations: new Map<string, RecentAssociationState>(),
     pulseEvents: [],
     nextPulseId: 1,
+    contextEmbedding: createZeroEmbedding(),
+    pendingContextEmbedding: createZeroEmbedding(),
   };
 }
 
@@ -738,6 +926,8 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
       appearance: clonePulseAppearance(event.appearance),
     })),
     nextPulseId: state.nextPulseId,
+    contextEmbedding: cloneEmbedding(state.contextEmbedding),
+    pendingContextEmbedding: cloneEmbedding(state.pendingContextEmbedding),
   } satisfies SerializedBrainState;
 }
 
@@ -866,6 +1056,8 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
     } satisfies BrainPulseEvent;
   });
   base.nextPulseId = typeof serialized.nextPulseId === 'number' ? serialized.nextPulseId : 1;
+  base.contextEmbedding = coerceEmbedding(serialized.contextEmbedding);
+  base.pendingContextEmbedding = coerceEmbedding(serialized.pendingContextEmbedding);
   return base;
 }
 
@@ -912,7 +1104,9 @@ export function tickBrain(
   refreshDynamicEdgeCache(state);
   let decision: BrainDecision | null = null;
   const metadata = requireNode(brain, state.currentNodeId);
-  const candidates = evaluateCandidates(brain, state, state.currentNodeId, multipliers);
+  const effectiveMultipliers = createEffectiveMultipliers(multipliers, moodLevels);
+  updateContextEmbedding(state, brain, effectiveMultipliers, metadata);
+  const candidates = evaluateCandidates(brain, state, state.currentNodeId, effectiveMultipliers);
 
   if (candidates.length === 0) {
     if (state.nodeTimer > 0) {
@@ -1023,9 +1217,28 @@ export function cloneBrainDecision(decision: BrainDecision | null): BrainDecisio
       personalityMultiplier: candidate.personalityMultiplier,
       demandMultiplier: candidate.demandMultiplier,
       totalMultiplier: candidate.totalMultiplier,
+      attentionScore: candidate.attentionScore,
+      embedding: cloneEmbedding(candidate.embedding),
       tags: [...candidate.tags],
     })),
   } satisfies BrainDecision;
+}
+
+function accumulateContextContribution(
+  state: BrainState,
+  candidate: BrainDecisionFactor,
+  payload: number,
+): void {
+  if (!Number.isFinite(payload) || payload <= MIN_CHARGE_VALUE) {
+    return;
+  }
+  if (!candidate.embedding || candidate.embedding.length === 0) {
+    return;
+  }
+  if (!Array.isArray(state.pendingContextEmbedding) || state.pendingContextEmbedding.length === 0) {
+    state.pendingContextEmbedding = createZeroEmbedding();
+  }
+  addScaledEmbedding(state.pendingContextEmbedding, candidate.embedding, payload);
 }
 
 function distributePulseBudget(
@@ -1153,6 +1366,7 @@ function distributePulseBudget(
     const pendingBefore = nextPending.length;
     let lastLocalPulseIndex = -1;
     let lastLocalEventIndex = -1;
+    let contextPayload = 0;
 
     for (let i = 0; i < pulseCount; i += 1) {
       const isLast = i === pulseCount - 1;
@@ -1184,6 +1398,7 @@ function distributePulseBudget(
       }
       const payload = candidatePayload;
       remaining = Math.max(0, remaining - payload);
+      contextPayload += Math.max(0, payload);
       const weightRatio = allocation > 0 ? payload / allocation : 0;
       const travelDuration = resolveTravelDuration(weightRatio, desirabilityShare);
       const payloadRate = travelDuration > 0 ? payload / travelDuration : payload;
@@ -1256,6 +1471,11 @@ function distributePulseBudget(
         payloadRate,
         appearance: clonePulseAppearance(appearance),
       });
+      contextPayload += Math.max(0, allocation);
+    }
+
+    if (contextPayload > MIN_CHARGE_VALUE) {
+      accumulateContextContribution(state, candidate, contextPayload);
     }
   }
 
@@ -1387,6 +1607,22 @@ function makeEdgeKey(sourceId: string, targetId: string): string {
   return `${sourceId}->${targetId}`;
 }
 
+function computeAttentionModifier(
+  contextEmbedding: ReadonlyArray<number>,
+  candidateEmbedding: ReadonlyArray<number>,
+): number {
+  if (isZeroEmbedding(contextEmbedding) || isZeroEmbedding(candidateEmbedding)) {
+    return 1;
+  }
+  const rawDot = dotProduct(contextEmbedding, candidateEmbedding);
+  const clampedDot = Math.max(-1, Math.min(1, rawDot));
+  const score = Math.exp(clampedDot * ATTENTION_GAIN);
+  if (!Number.isFinite(score)) {
+    return 1;
+  }
+  return Math.max(score, MIN_ATTENTION_SCORE);
+}
+
 function evaluateCandidates(
   brain: BrainGraphRuntime,
   state: BrainState,
@@ -1426,13 +1662,19 @@ function evaluateCandidates(
   const sourceEdges = Array.from(merged.values());
 
   const candidates: BrainDecisionFactor[] = [];
+  const contextEmbedding = state.contextEmbedding ?? createZeroEmbedding();
   for (const edge of sourceEdges) {
     const targetNode = requireNode(brain, edge.targetId);
     const adjustedWeight = applyPlasticityToWeight(state.plasticity, sourceNodeId, edge.targetId, edge.weight);
     const moodMultiplier = productForTags(targetNode.tags, multipliers.mood);
     const personalityMultiplier = productForTags(targetNode.tags, multipliers.personality);
     const demandMultiplier = productForTags(targetNode.tags, multipliers.demand);
-    const totalMultiplier = moodMultiplier * personalityMultiplier * demandMultiplier;
+    const legacyMultiplier = moodMultiplier * personalityMultiplier * demandMultiplier;
+    const attentionModifier = computeAttentionModifier(contextEmbedding, targetNode.embedding);
+    const baseMultiplier = legacyMultiplier > 0 ? legacyMultiplier : 1;
+    const blendedAttention = 1 + ATTENTION_BLEND * (attentionModifier - 1);
+    const totalMultiplier = baseMultiplier * Math.max(blendedAttention, MIN_ATTENTION_SCORE);
+    const attentionScore = attentionModifier;
     const plasticityAdjustment = adjustedWeight - edge.weight;
     const desirability =
       adjustedWeight * targetNode.baseFrequency * totalMultiplier;
@@ -1447,6 +1689,8 @@ function evaluateCandidates(
       personalityMultiplier,
       demandMultiplier,
       totalMultiplier,
+      attentionScore,
+      embedding: targetNode.embedding,
       tags: targetNode.tags,
     });
   }
