@@ -7,6 +7,7 @@ import {
 import type { CityState, HouseState } from './collectives.ts';
 import type { RngStream } from './rng.ts';
 import { clampPosition, getResourceStock, isWithinBounds, type WorldState } from './world.ts';
+import type { RelationshipState } from './relationships.ts';
 import {
   RESOURCE_TYPES,
   cloneResourceBundle,
@@ -50,6 +51,7 @@ export interface MovableAgent {
   houseId: string | null;
   traitFlags: string[];
   movement: MovementState;
+  relationships: RelationshipState;
 }
 
 export interface MovementContext {
@@ -71,6 +73,22 @@ interface MovementBehaviorScoreInput {
   city: CityState | null;
   cityResourceNeeds: ResourceBundle;
   context: MovementContext;
+  relationships: RelationshipSummary;
+}
+
+interface RelationshipSummary {
+  houseTrust: number;
+  houseObligation: number;
+  cityTrust: number;
+  cityObligation: number;
+  rivalryPressure: number;
+  allyFocus: MovementTarget | null;
+  rivalFocus: MovementTarget | null;
+}
+
+interface WeightedAgentTarget {
+  target: MovableAgent;
+  weight: number;
 }
 
 interface MovementBehaviorResult {
@@ -427,6 +445,8 @@ function buildBehaviorInput(
     }
   }
 
+  const relationships = summarizeRelationships(agent, house, context.city, context);
+
   return {
     agent,
     metadata,
@@ -438,7 +458,111 @@ function buildBehaviorInput(
     city: context.city,
     cityResourceNeeds: context.city ? cloneResourceBundle(context.city.resourceNeeds) : cloneResourceBundle(),
     context,
+    relationships,
   };
+}
+
+function summarizeRelationships(
+  agent: MovableAgent,
+  house: HouseState | null,
+  city: CityState | null,
+  context: MovementContext,
+): RelationshipSummary {
+  const summary: RelationshipSummary = {
+    houseTrust: 0,
+    houseObligation: 0,
+    cityTrust: 0,
+    cityObligation: 0,
+    rivalryPressure: 0,
+    allyFocus: null,
+    rivalFocus: null,
+  };
+  const state = agent.relationships;
+  if (!state || !state.weights) {
+    return summary;
+  }
+
+  const houseMembers = new Set<string>(house?.members ?? []);
+  const cityLeaders = new Set<string>(city?.leaders?.map((leader) => leader.agentId) ?? []);
+  let houseTrustTotal = 0;
+  let houseTrustCount = 0;
+  let houseObligationTotal = 0;
+  let houseObligationCount = 0;
+  let cityTrustTotal = 0;
+  let cityTrustCount = 0;
+  let cityObligationTotal = 0;
+  let cityObligationCount = 0;
+  const allyCandidates: WeightedAgentTarget[] = [];
+  const rivalCandidates: WeightedAgentTarget[] = [];
+
+  for (const [targetId, weights] of Object.entries(state.weights)) {
+    const trust = Math.max(0, weights.trust);
+    const rivalry = Math.max(0, weights.rivalry);
+    const obligation = Math.max(0, weights.obligation);
+    if (houseMembers.has(targetId)) {
+      if (trust > 0) {
+        houseTrustTotal += trust;
+        houseTrustCount += 1;
+      }
+      if (obligation > 0) {
+        houseObligationTotal += obligation;
+        houseObligationCount += 1;
+      }
+    } else if (cityLeaders.has(targetId)) {
+      if (trust > 0) {
+        cityTrustTotal += trust;
+        cityTrustCount += 1;
+      }
+      if (obligation > 0) {
+        cityObligationTotal += obligation;
+        cityObligationCount += 1;
+      }
+    }
+    if (rivalry > summary.rivalryPressure) {
+      summary.rivalryPressure = rivalry;
+    }
+    const targetAgent = context.agentsById.get(targetId);
+    if (targetAgent) {
+      if (trust > 0) {
+        allyCandidates.push({ target: targetAgent, weight: trust });
+      }
+      if (rivalry > 0) {
+        rivalCandidates.push({ target: targetAgent, weight: rivalry });
+      }
+    }
+  }
+
+  summary.houseTrust = houseTrustCount > 0 ? houseTrustTotal / houseTrustCount : 0;
+  summary.houseObligation = houseObligationCount > 0 ? houseObligationTotal / houseObligationCount : 0;
+  summary.cityTrust = cityTrustCount > 0 ? cityTrustTotal / cityTrustCount : 0;
+  summary.cityObligation = cityObligationCount > 0 ? cityObligationTotal / cityObligationCount : 0;
+  summary.allyFocus = computeWeightedFocus(allyCandidates, 3);
+  summary.rivalFocus = computeWeightedFocus(rivalCandidates, 2);
+  return summary;
+}
+
+function computeWeightedFocus(
+  candidates: WeightedAgentTarget[],
+  limit: number,
+): MovementTarget | null {
+  if (candidates.length === 0) {
+    return null;
+  }
+  const sorted = [...candidates];
+  sorted.sort((a, b) => b.weight - a.weight);
+  let totalWeight = 0;
+  let sumX = 0;
+  let sumY = 0;
+  for (const entry of sorted.slice(0, Math.max(1, limit))) {
+    const weight = Math.max(EPSILON, entry.weight);
+    totalWeight += weight;
+    sumX += entry.target.x * weight;
+    sumY += entry.target.y * weight;
+  }
+  if (totalWeight <= EPSILON) {
+    return null;
+  }
+  return { x: sumX / totalWeight, y: sumY / totalWeight };
 }
 
 function selectMovementBehavior(input: MovementBehaviorScoreInput, stream: RngStream): MovementBehavior | null {
@@ -757,6 +881,19 @@ function selectSocialAnchor(
   context: MovementContext,
   stream: RngStream,
 ): MovementTarget {
+  const relationships = input.relationships;
+  if (relationships.allyFocus) {
+    return clampPosition(context.world, relationships.allyFocus.x, relationships.allyFocus.y);
+  }
+  if (relationships.rivalFocus) {
+    const dx = input.agent.x - relationships.rivalFocus.x;
+    const dy = input.agent.y - relationships.rivalFocus.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const offset = Math.max(3, 5 - input.agent.explorationBias * 2);
+    const x = input.agent.x + (dx / length) * offset;
+    const y = input.agent.y + (dy / length) * offset;
+    return clampPosition(context.world, x, y);
+  }
   if (input.house && input.house.members.length > 1) {
     return { x: input.house.x, y: input.house.y };
   }
@@ -783,7 +920,7 @@ function coerceNumber(value: unknown, fallback: number): number {
 
 registerMovementBehavior({
   id: 'wander',
-  score({ metadata, tags, agent }) {
+  score({ metadata, tags, agent, relationships }) {
     if (!tags.includes('outward') && metadata.id !== 'Wander' && !tags.includes('wander')) {
       return 0;
     }
@@ -793,6 +930,12 @@ registerMovementBehavior({
     }
     if (tags.includes('guard') || tags.includes('build')) {
       score *= 0.6;
+    }
+    if (relationships.rivalryPressure > 0.15) {
+      score += relationships.rivalryPressure * 0.35;
+    }
+    if (relationships.houseTrust > 0.45 && !tags.includes('outward')) {
+      score *= 0.85;
     }
     return score;
   },
@@ -826,7 +969,7 @@ registerMovementBehavior({
 
 registerMovementBehavior({
   id: 'patrol',
-  score({ tags, traitFlags, metadata, house }) {
+  score({ tags, traitFlags, metadata, house, relationships }) {
     if (!tags.includes('guard') && !tags.includes('patrol') && metadata.id !== 'Patrol') {
       if (!traitFlags.includes('territorial')) {
         return 0;
@@ -841,6 +984,12 @@ registerMovementBehavior({
     }
     if (!house) {
       score *= 0.8;
+    }
+    if (relationships.houseTrust > 0) {
+      score += relationships.houseTrust * 0.45;
+    }
+    if (relationships.rivalryPressure > 0.05) {
+      score += relationships.rivalryPressure * 0.5;
     }
     return score;
   },
@@ -988,13 +1137,20 @@ function resolveDeliveryPlan(
   const city = input.city;
   const houseNeed = getResourceAmount(input.houseResourceNeeds, resourceType);
   const cityNeed = getResourceAmount(input.cityResourceNeeds, resourceType);
+  const rel = input.relationships;
+  const weightedHouse = house
+    ? houseNeed * (1 + rel.houseTrust * 0.45 + rel.houseObligation * 0.65)
+    : 0;
+  const weightedCity = city
+    ? cityNeed * (1 + rel.cityTrust * 0.35 + rel.cityObligation * 0.75)
+    : 0;
 
-  if (house && (houseNeed >= cityNeed * 0.85 || !city)) {
+  if (house && (!city || weightedHouse >= weightedCity * 0.9)) {
     const reach = Math.max(1.5, house.radius + 1.5);
     return { target: { x: house.x, y: house.y }, reach, scope: 'house' };
   }
 
-  if (city) {
+  if (city && weightedCity > 0) {
     const reach = Math.max(2.5, city.radius + 2.5);
     return { target: { x: city.x, y: city.y }, reach, scope: 'city' };
   }
@@ -1026,6 +1182,13 @@ registerMovementBehavior({
     }
     if (metadata.id === 'Gather') {
       score += 0.2;
+    }
+    const rel = input.relationships;
+    const cooperativeBoost = rel.houseTrust * 0.3 + rel.cityTrust * 0.2;
+    const obligationBoost = rel.houseObligation * 0.45 + rel.cityObligation * 0.35;
+    score *= 1 + Math.min(0.75, cooperativeBoost + obligationBoost);
+    if (rel.rivalryPressure > 0.3) {
+      score *= 0.85;
     }
     return score;
   },
@@ -1091,7 +1254,7 @@ registerMovementBehavior({
 
 registerMovementBehavior({
   id: 'social-visit',
-  score({ tags, metadata, traitFlags }) {
+  score({ tags, metadata, traitFlags, relationships }) {
     if (!tags.includes('social') && metadata.id !== 'Socialize') {
       return 0;
     }
@@ -1101,6 +1264,11 @@ registerMovementBehavior({
     }
     if (metadata.id === 'Socialize') {
       score += 0.3;
+    }
+    score += relationships.houseTrust * 0.5 + relationships.cityTrust * 0.25;
+    score += relationships.houseObligation * 0.35;
+    if (relationships.rivalryPressure > 0.25) {
+      score *= 0.8;
     }
     return score;
   },

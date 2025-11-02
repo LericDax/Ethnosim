@@ -17,6 +17,12 @@ import {
   type ResourceBundle,
   type ResourceType,
 } from './resources.ts';
+import {
+  registerLeadershipSelectionRelationships,
+  registerDemandPressure,
+} from './relationships.ts';
+import type { RelationshipState } from './relationships.ts';
+import type { AgentState } from '../sim.worker.ts';
 
 export type { ResourceBundle, ResourceType } from './resources.ts';
 export { RESOURCE_TYPES } from './resources.ts';
@@ -445,6 +451,7 @@ export interface HouseAssignableAgent {
   lifeStage: LifeStage;
   temperament: TemperamentProfile;
   traitFlags: string[];
+  relationships: RelationshipState;
 }
 
 export interface HouseState {
@@ -856,6 +863,12 @@ export function updateCollectiveDemands(
       }
     }
   }
+  const agentMapFull = agentMap as unknown as Map<string, AgentState>;
+  const cityPressure = new Map<string, number>();
+  const cityEligibleIds = new Set<string>();
+  const cityEligibleAgents: AgentState[] = [];
+  const processedCityAgents = new Set<string>();
+  let primaryCityLeader: AgentState | null = null;
 
   if (city) {
     electCityLeadership(city, agents, {
@@ -864,20 +877,34 @@ export function updateCollectiveDemands(
     });
     runCityScheduler(city, { currentTick, rng: options.rng ?? null });
     applyCityResourceDemand(city);
-    if (city.activeDemand && Object.keys(city.activeDemand).length > 0 && currentTick <= city.demandExpiresAt) {
-      const radiusSq = city.radius * city.radius;
-      for (const agent of agents) {
-        if (!CITY_ELIGIBLE_STAGES.includes(agent.lifeStage)) {
-          continue;
-        }
-        const dx = agent.x - city.x;
-        const dy = agent.y - city.y;
-        if (dx * dx + dy * dy > radiusSq) {
-          continue;
-        }
-        const demand = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
-        applyDemandMultipliers(demand, city.activeDemand);
-        applyDemandMultipliers(demand, city.leaderDirectives);
+    primaryCityLeader = resolveLeaderAgent(city.leaders, agentMapFull, city.primaryLeaderId);
+    const cityDemandIntensity =
+      sumDemandWeights(city.activeDemand) + sumDemandWeights(city.leaderDirectives);
+    const radiusSq = city.radius * city.radius;
+    const demandActive =
+      Boolean(city.activeDemand && Object.keys(city.activeDemand).length > 0) &&
+      currentTick <= city.demandExpiresAt;
+    for (const agent of agents) {
+      if (!CITY_ELIGIBLE_STAGES.includes(agent.lifeStage)) {
+        continue;
+      }
+      const dx = agent.x - city.x;
+      const dy = agent.y - city.y;
+      if (dx * dx + dy * dy > radiusSq) {
+        continue;
+      }
+      if (!cityEligibleIds.has(agent.id)) {
+        cityEligibleIds.add(agent.id);
+        cityEligibleAgents.push(agent as AgentState);
+      }
+      if (!demandActive) {
+        continue;
+      }
+      const demand = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
+      applyDemandMultipliers(demand, city.activeDemand);
+      applyDemandMultipliers(demand, city.leaderDirectives);
+      if (cityDemandIntensity > 0) {
+        cityPressure.set(agent.id, cityDemandIntensity);
       }
     }
   }
@@ -895,15 +922,78 @@ export function updateCollectiveDemands(
       continue;
     }
 
+    const houseDemandIntensity =
+      sumDemandWeights(template) + sumDemandWeights(house.leaderDirectives);
+    const houseLeader = resolveLeaderAgent(house.leaders, agentMapFull, house.primaryLeaderId);
+    const memberAgents: AgentState[] = [];
+
     for (const memberId of house.members) {
       const agent = agentMap.get(memberId);
       if (!agent) {
         continue;
       }
-      const demand = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
+      const memberAgent = agent as AgentState;
+      const demand = memberAgent.brainMultipliers.demand ?? (memberAgent.brainMultipliers.demand = {});
       applyDemandMultipliers(demand, template);
       applyDemandMultipliers(demand, house.leaderDirectives);
+      memberAgents.push(memberAgent);
+
+      const cityIntensity = cityPressure.get(memberAgent.id) ?? 0;
+      const conflict = houseDemandIntensity > 0.2 && cityIntensity > 0.2;
+      if (houseDemandIntensity > 0) {
+        registerDemandPressure(
+          memberAgent,
+          houseLeader,
+          houseDemandIntensity,
+          'house',
+          conflict,
+          currentTick,
+        );
+      }
+      if (cityIntensity > 0) {
+        registerDemandPressure(
+          memberAgent,
+          primaryCityLeader,
+          cityIntensity,
+          'city',
+          conflict,
+          currentTick,
+        );
+        processedCityAgents.add(memberAgent.id);
+      }
     }
+
+    if (memberAgents.length > 0) {
+      registerLeadershipSelectionRelationships(
+        agentMapFull,
+        house.leaders,
+        memberAgents,
+        'house',
+        currentTick,
+      );
+    }
+  }
+
+  if (cityEligibleAgents.length > 0) {
+    registerLeadershipSelectionRelationships(
+      agentMapFull,
+      city?.leaders ?? [],
+      cityEligibleAgents,
+      'city',
+      currentTick,
+    );
+  }
+
+  for (const agent of cityEligibleAgents) {
+    if (processedCityAgents.has(agent.id)) {
+      continue;
+    }
+    const intensity = cityPressure.get(agent.id) ?? 0;
+    if (intensity <= 0) {
+      continue;
+    }
+    registerDemandPressure(agent, primaryCityLeader, intensity, 'city', false, currentTick);
+    processedCityAgents.add(agent.id);
   }
 }
 
@@ -1233,6 +1323,43 @@ function accumulateDirective(target: Record<string, number>, tag: string, value:
   }
   const existing = target[tag] ?? 0;
   target[tag] = existing + value;
+}
+
+function sumDemandWeights(template?: Record<string, number> | null): number {
+  if (!template) {
+    return 0;
+  }
+  let total = 0;
+  for (const value of Object.values(template)) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      total += numeric;
+    }
+  }
+  return total;
+}
+
+function resolveLeaderAgent(
+  leaders: CollectiveLeaderDescriptor[] | undefined,
+  agentMap: Map<string, AgentState>,
+  preferredId: string | null | undefined,
+): AgentState | null {
+  if (preferredId) {
+    const preferred = agentMap.get(preferredId);
+    if (preferred) {
+      return preferred;
+    }
+  }
+  if (!leaders) {
+    return null;
+  }
+  for (const leader of leaders) {
+    const agent = agentMap.get(leader.agentId);
+    if (agent) {
+      return agent;
+    }
+  }
+  return null;
 }
 
 export function cloneLeaderDescriptor(

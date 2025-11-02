@@ -77,6 +77,17 @@ import {
 } from './engine/chromosomes.ts';
 import { resolveScenario, scenarioToSimulationDefaults } from './data/scenarios.ts';
 import type { ReproductiveGroup } from './engine/repro.ts';
+import {
+  createInitialRelationshipState,
+  decayRelationshipState,
+  recordCoHousingInteractions,
+  registerSharedWorkWithCity,
+  registerSharedWorkWithHouse,
+  registerPregnancyBond,
+  registerBirthBond,
+  updateRelationshipMultipliers,
+} from './engine/relationships.ts';
+import type { RelationshipState } from './engine/relationships.ts';
 
 export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
@@ -132,6 +143,7 @@ export interface AgentState extends MovableAgent, HouseAssignableAgent {
   brainNodeDuration: number;
   carriedResources: ResourceBundle;
   resourceActivity: AgentResourceActivity | null;
+  relationships: RelationshipState;
 }
 
 interface SimulationRng {
@@ -810,6 +822,7 @@ export function createSimulationState(config: SimulationConfig): SimulationState
   const initialAgentMap = buildAgentMap(simulation.agents);
   updateHousingQueue(simulation, initialAssignment.overflowAgents, initialAgentMap);
   updateHousingMoods(simulation);
+  recordCoHousingInteractions(simulation);
   if (initialAssignment.allHousesFull && initialAssignment.overflowAgents.length > 0) {
     for (const house of simulation.houses) {
       if (!house.construction.active) {
@@ -862,7 +875,7 @@ function createAgents(
         ? Math.floor(stream.nextFloat() * Math.max(1, Math.floor(ageLimit * 0.75)))
         : 0;
 
-    agents.push({
+    const agent: AgentState = {
       id: `agent-${i}`,
       x: stream.nextFloat() * width,
       y: stream.nextFloat() * height,
@@ -893,7 +906,10 @@ function createAgents(
       carriedResources: createResourceBundle(),
       resourceActivity: null,
       movement: createInitialMovementState(),
-    });
+      relationships: createInitialRelationshipState(),
+    };
+    updateRelationshipMultipliers(agent);
+    agents.push(agent);
   }
 
   const adults = agents.filter((agent) => agent.lifeStage === 'adult');
@@ -944,7 +960,7 @@ function shuffleInPlace<T>(array: T[], stream: RngStream): void {
 }
 
 function buildBrainMultipliers(profile: ReturnType<typeof createTraitProfile>): BrainMultiplierSet {
-  const multipliers: BrainMultiplierSet = { demand: {} };
+  const multipliers: BrainMultiplierSet = { demand: {}, relationship: {} };
   if (profile.multipliers.mood) {
     multipliers.mood = { ...profile.multipliers.mood };
   }
@@ -1018,6 +1034,8 @@ export function stepSimulationState(simulation: SimulationState): void {
   matchReproductivePartners(simulation);
   handleReproduction(simulation);
 
+  simulation.agents.forEach((agent) => decayRelationshipState(agent, simulation.tick));
+
   const assignment = assignAgentsToHouses(simulation.houses, simulation.agents, {
     currentTick: simulation.tick,
     rng: simulation.rng.collectives,
@@ -1025,6 +1043,7 @@ export function stepSimulationState(simulation: SimulationState): void {
   const agentsById = buildAgentMap(simulation.agents);
   updateHousingQueue(simulation, assignment.overflowAgents, agentsById);
   updateHousingMoods(simulation);
+  recordCoHousingInteractions(simulation);
   for (const house of simulation.houses) {
     if (house.capacityPressure > 0 && !house.construction.active) {
       house.construction.active = true;
@@ -1284,6 +1303,7 @@ function handleAgentResourceActions(
         applyHouseDelivery(house, type, removed);
         recordAgentResourceActivity(agent, 'delivered', type, removed);
         rewardDelivery(removed, type);
+        registerSharedWorkWithHouse(simulation, agent, house.members, removed, type);
         delivered = true;
       }
     }
@@ -1304,6 +1324,7 @@ function handleAgentResourceActions(
         applyCityDelivery(city, type, removed);
         recordAgentResourceActivity(agent, 'delivered', type, removed);
         rewardDelivery(removed, type);
+        registerSharedWorkWithCity(simulation, agent, city.leaders, removed, type);
         delivered = true;
       }
     }

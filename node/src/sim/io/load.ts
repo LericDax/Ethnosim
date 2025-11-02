@@ -38,6 +38,8 @@ import {
   type SerializedLeadershipState,
 } from './save.ts';
 import { matchReproductivePartners } from '../engine/repro.ts';
+import type { RelationshipState } from '../engine/relationships.ts';
+import { updateRelationshipMultipliers } from '../engine/relationships.ts';
 import { getScenarioById } from '../data/scenarios.ts';
 import type { ReproductiveGroup } from '../engine/repro.ts';
 import { createInitialMovementState } from '../engine/move.ts';
@@ -332,7 +334,7 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     ? [...serialized.reproductiveRoles]
     : [...chromosomes.roles];
 
-  return {
+  const restored: AgentState = {
     id: serialized.id,
     x: serialized.x,
     y: serialized.y,
@@ -365,7 +367,10 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     carriedResources: ensureResourceBundle(cloneBundle(serialized.carriedResources)),
     resourceActivity: cloneAgentResourceActivity(serialized.resourceActivity),
     movement: restoreMovementState(serialized.movement),
+    relationships: restoreRelationships(serialized.relationships),
   };
+  updateRelationshipMultipliers(restored);
+  return restored;
 }
 
 function restoreMovementState(serialized: SerializedMovementState | undefined): AgentState['movement'] {
@@ -601,7 +606,41 @@ function cloneBrainMultipliers(multipliers: AgentState['brainMultipliers']): Age
   if (multipliers.demand) {
     clone.demand = { ...multipliers.demand };
   }
+  if (multipliers.relationship) {
+    clone.relationship = { ...multipliers.relationship };
+  }
   return clone;
+}
+
+function restoreRelationships(serialized: RelationshipState | undefined): RelationshipState {
+  const weights: RelationshipState['weights'] = {};
+  if (serialized?.weights) {
+    for (const [id, entry] of Object.entries(serialized.weights)) {
+      weights[id] = {
+        trust: Number.isFinite(entry.trust) ? entry.trust : 0,
+        rivalry: Number.isFinite(entry.rivalry) ? entry.rivalry : 0,
+        obligation: Number.isFinite(entry.obligation) ? entry.obligation : 0,
+      };
+    }
+  }
+  const events = Array.isArray(serialized?.events)
+    ? serialized.events.map((event) => ({
+        tick: event.tick ?? 0,
+        targetId: event.targetId ?? '',
+        type: event.type,
+        delta: {
+          trust: event.delta?.trust ?? 0,
+          rivalry: event.delta?.rivalry ?? 0,
+          obligation: event.delta?.obligation ?? 0,
+        },
+        note: event.note,
+      }))
+    : [];
+  return {
+    weights,
+    events,
+    lastEvaluatedTick: serialized?.lastEvaluatedTick ?? 0,
+  };
 }
 
 async function openDatabase(): Promise<IDBDatabase> {
