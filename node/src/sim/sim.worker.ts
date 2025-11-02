@@ -215,6 +215,11 @@ const FEAR_MOOD_MAX = 3;
 const ALERT_MOOD_MAX = 2;
 const FEAR_ALERT_SCALE = 0.6;
 const FEAR_RESPONSE_EPSILON = 1e-3;
+const INFANT_ATTACHMENT_RADIUS = 6;
+const INFANT_ATTACHMENT_RADIUS_SQ = INFANT_ATTACHMENT_RADIUS * INFANT_ATTACHMENT_RADIUS;
+const INFANT_ATTACHMENT_SEPARATION_CAP = 2.25;
+const INFANT_ATTACHMENT_STRESS_SCALE = 1.4;
+const INFANT_ATTACHMENT_ORPHAN_STRESS = 1.6;
 // Nodes in agent brains that actively harvest resources when present on resource tiles.
 const RESOURCE_GATHER_NODES = new Set<string>(['Gather', 'BuildDwelling']);
 
@@ -1198,7 +1203,12 @@ function updateThreatMoods(simulation: SimulationState, agentsById: Map<string, 
       agent.moods = { [UNHOUSED_MOOD_KEY]: 0 };
     }
 
-    const threatLevel = computeNearbyHostility(agent, agentsById);
+    const attachmentStress =
+      agent.lifeStage === 'baby'
+        ? computeInfantAttachmentStress(agent, simulation, agentsById)
+        : 0;
+    const hostilityThreat = computeNearbyHostility(agent, agentsById);
+    const threatLevel = Math.min(FEAR_MOOD_MAX, hostilityThreat + attachmentStress);
     const rawCurrentFear = agent.moods[FEAR_MOOD_KEY];
     const currentFear =
       Number.isFinite(rawCurrentFear) && (rawCurrentFear as number) > 0
@@ -1253,6 +1263,72 @@ function updateThreatMoods(simulation: SimulationState, agentsById: Map<string, 
       delete agent.moods[ALERT_MOOD_KEY];
     }
   }
+}
+
+function computeInfantAttachmentStress(
+  agent: AgentState,
+  simulation: SimulationState,
+  agentsById: Map<string, AgentState>,
+): number {
+  if (agent.lifeStage !== 'baby') {
+    return 0;
+  }
+
+  const candidateIds = new Set<string>();
+  if (agent.caregiverId) {
+    candidateIds.add(agent.caregiverId);
+  }
+  for (const parentId of agent.parents ?? []) {
+    if (parentId) {
+      candidateIds.add(parentId);
+    }
+  }
+
+  if (candidateIds.size === 0 && agent.houseId) {
+    for (const other of simulation.agents) {
+      if (other.id === agent.id) {
+        continue;
+      }
+      if (other.houseId !== agent.houseId) {
+        continue;
+      }
+      if (other.lifeStage === 'baby') {
+        continue;
+      }
+      candidateIds.add(other.id);
+    }
+  }
+
+  let minDistanceSq = Number.POSITIVE_INFINITY;
+  for (const candidateId of candidateIds) {
+    const caregiver = agentsById.get(candidateId);
+    if (!caregiver) {
+      continue;
+    }
+    const dx = caregiver.x - agent.x;
+    const dy = caregiver.y - agent.y;
+    const distanceSq = dx * dx + dy * dy;
+    if (distanceSq <= INFANT_ATTACHMENT_RADIUS_SQ) {
+      return 0;
+    }
+    if (distanceSq < minDistanceSq) {
+      minDistanceSq = distanceSq;
+    }
+  }
+
+  if (!Number.isFinite(minDistanceSq)) {
+    return INFANT_ATTACHMENT_ORPHAN_STRESS;
+  }
+
+  const distance = Math.sqrt(minDistanceSq);
+  const separation = Math.max(0, distance - INFANT_ATTACHMENT_RADIUS);
+  if (separation <= 0) {
+    return 0;
+  }
+
+  const normalized = Math.min(INFANT_ATTACHMENT_SEPARATION_CAP, separation / INFANT_ATTACHMENT_RADIUS);
+  const stress = normalized * INFANT_ATTACHMENT_STRESS_SCALE;
+  return Math.min(FEAR_MOOD_MAX, stress);
 }
 
 function computeNearbyHostility(
