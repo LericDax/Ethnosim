@@ -18,20 +18,24 @@ class BrainJsonSchemaTest(unittest.TestCase):
         test_dir = Path(__file__).resolve().parent
         python_lab_dir = test_dir.parent
         repo_root = python_lab_dir.parent
-        self.python_brain_dir = python_lab_dir / "data" / "brains"
+        self.shared_brain_dir = repo_root / "shared" / "brains"
         self.node_brain_dir = repo_root / "node" / "src" / "sim" / "data"
+        self.python_brain_dir = python_lab_dir / "data" / "brains"
 
-    def test_brain_files_exist_and_match(self):
+    def test_shared_brain_files_exist_without_duplicates(self):
         for name in BRAIN_NAMES:
             with self.subTest(brain=name):
-                python_path = self.python_brain_dir / f"{name}.json"
+                shared_path = self.shared_brain_dir / f"{name}.json"
+                self.assertTrue(shared_path.is_file(), f"Missing {shared_path}")
                 node_path = self.node_brain_dir / f"{name}.json"
-                self.assertTrue(python_path.is_file(), f"Missing {python_path}")
-                self.assertTrue(node_path.is_file(), f"Missing {node_path}")
-                self.assertEqual(
-                    python_path.read_text(encoding="utf-8"),
-                    node_path.read_text(encoding="utf-8"),
-                    "Brain JSON copies diverged between python_lab and node directories",
+                self.assertFalse(
+                    node_path.exists(),
+                    f"Legacy brain copy should be removed: {node_path}",
+                )
+                python_path = self.python_brain_dir / f"{name}.json"
+                self.assertFalse(
+                    python_path.exists(),
+                    f"Legacy brain copy should be removed: {python_path}",
                 )
 
     def test_brain_schema(self):
@@ -41,7 +45,7 @@ class BrainJsonSchemaTest(unittest.TestCase):
                 self._assert_brain_schema(name, data)
 
     def _load_brain(self, name: str):
-        path = self.python_brain_dir / f"{name}.json"
+        path = self.shared_brain_dir / f"{name}.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _assert_brain_schema(self, name: str, data: dict):
@@ -68,6 +72,17 @@ class BrainJsonSchemaTest(unittest.TestCase):
             self.assertGreater(len(tags), 0)
             for tag in tags:
                 self.assertIsInstance(tag, str)
+            if "charge_capacity" in node:
+                charge_capacity = node.get("charge_capacity")
+                charge_leak = node.get("charge_leak")
+                self.assertIsInstance(charge_capacity, (int, float))
+                self.assertGreater(charge_capacity, 0)
+                self.assertIsInstance(charge_leak, (int, float))
+                self.assertGreaterEqual(charge_leak, 0)
+            if "pulse_budget_scale" in node:
+                pulse_budget_scale = node.get("pulse_budget_scale")
+                self.assertIsInstance(pulse_budget_scale, (int, float))
+                self.assertGreater(pulse_budget_scale, 0)
         edges = data.get("edges")
         self.assertIsInstance(edges, list)
         for edge in edges:

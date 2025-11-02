@@ -3,10 +3,26 @@
   "name": "TeenMind_v1",
   "nodes": [
     { "id": "ProveMyself", "base_freq": 1.0, "duration": 6, "tags": ["status", "risk", "outward"] },
-    { "id": "ShowLoyalty", "base_freq": 1.0, "duration": 6, "tags": ["loyalty", "ritual", "inward"] },
-    { "id": "SneakAndHoard", "base_freq": 0.9, "duration": 6, "tags": ["resource", "selfish", "resentment"] },
-    { "id": "ChallengeBorder", "base_freq": 0.9, "duration": 6, "tags": ["border", "territorial", "risk"] },
-    { "id": "CourtAlly", "base_freq": 0.8, "duration": 6, "tags": ["social", "bonding", "future_pair"] }
+    {
+      "id": "ShowLoyalty",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["loyalty", "ritual", "inward"],
+      "charge_capacity": 1.2,
+      "charge_leak": 0.98,
+      "pulse_budget_scale": 0.9
+    },
+    { "id": "SneakAndHoard", "base_freq": 1.0, "duration": 6, "tags": ["resource", "selfish", "resentment"] },
+    { "id": "ChallengeBorder", "base_freq": 1.0, "duration": 6, "tags": ["border", "territorial", "risk"] },
+    {
+      "id": "CourtAlly",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["social", "bonding", "future_pair"],
+      "charge_capacity": 1.25,
+      "charge_leak": 0.98,
+      "pulse_budget_scale": 0.88
+    }
   ],
   "edges": [
     ["ProveMyself", "ShowLoyalty", 0.7],

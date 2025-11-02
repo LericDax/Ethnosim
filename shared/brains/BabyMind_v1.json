@@ -3,10 +3,34 @@
   "name": "BabyMind_v1",
   "nodes": [
     { "id": "CryForCare", "base_freq": 1.0, "duration": 5, "tags": ["need", "social"] },
-    { "id": "Feed", "base_freq": 1.0, "duration": 5, "tags": ["need", "care"] },
-    { "id": "SleepWarm", "base_freq": 1.0, "duration": 5, "tags": ["rest", "home"] },
-    { "id": "ObserveVoices", "base_freq": 1.0, "duration": 5, "tags": ["learn", "social"] },
-    { "id": "FearScream", "base_freq": 0.6, "duration": 5, "tags": ["fear", "alert"] }
+    {
+      "id": "Feed",
+      "base_freq": 1.0,
+      "duration": 5,
+      "tags": ["need", "care"],
+      "charge_capacity": 1.15,
+      "charge_leak": 0.97,
+      "pulse_budget_scale": 0.9
+    },
+    {
+      "id": "SleepWarm",
+      "base_freq": 1.0,
+      "duration": 5,
+      "tags": ["rest", "home"],
+      "charge_capacity": 1.4,
+      "charge_leak": 0.987,
+      "pulse_budget_scale": 0.8
+    },
+    {
+      "id": "ObserveVoices",
+      "base_freq": 1.0,
+      "duration": 5,
+      "tags": ["learn", "social"],
+      "charge_capacity": 1.2,
+      "charge_leak": 0.98,
+      "pulse_budget_scale": 0.9
+    },
+    { "id": "FearScream", "base_freq": 1.0, "duration": 5, "tags": ["fear", "alert"] }
   ],
   "edges": [
     ["CryForCare", "Feed", 1.0],

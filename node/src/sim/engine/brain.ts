@@ -1,9 +1,9 @@
-import adultMindRaw from '../data/AdultMind_v1.json?raw';
-import babyMindRaw from '../data/BabyMind_v1.json?raw';
-import childMindRaw from '../data/ChildMind_v1.json?raw';
-import houseMindRaw from '../data/HouseMind_v1.json?raw';
-import teenMindRaw from '../data/TeenMind_v1.json?raw';
-import urbanMindRaw from '../data/UrbanMind_v1.json?raw';
+import adultMindRaw from '@shared/brains/AdultMind_v1.json?raw';
+import babyMindRaw from '@shared/brains/BabyMind_v1.json?raw';
+import childMindRaw from '@shared/brains/ChildMind_v1.json?raw';
+import houseMindRaw from '@shared/brains/HouseMind_v1.json?raw';
+import teenMindRaw from '@shared/brains/TeenMind_v1.json?raw';
+import urbanMindRaw from '@shared/brains/UrbanMind_v1.json?raw';
 import { JUMP_EDGE_DEFINITIONS } from './traits.ts';
 import type { RngStream } from './rng.ts';
 import {
