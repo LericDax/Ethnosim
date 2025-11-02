@@ -2,11 +2,35 @@
   "version": 1,
   "name": "ChildMind_v1",
   "nodes": [
-    { "id": "FollowCaregiver", "base_freq": 1.0, "duration": 6, "tags": ["home", "social", "safety"] },
+    {
+      "id": "FollowCaregiver",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["home", "social", "safety"],
+      "charge_capacity": 1.2,
+      "charge_leak": 0.98,
+      "pulse_budget_scale": 0.9
+    },
     { "id": "ExploreNearby", "base_freq": 1.0, "duration": 6, "tags": ["outward", "curiosity"] },
-    { "id": "FetchSmallThings", "base_freq": 0.8, "duration": 6, "tags": ["help", "duty"] },
-    { "id": "HideWhenScared", "base_freq": 0.8, "duration": 6, "tags": ["fear", "safety"] },
-    { "id": "ImitateRitual", "base_freq": 0.9, "duration": 6, "tags": ["ritual", "doctrine", "loyalty"] }
+    { "id": "FetchSmallThings", "base_freq": 1.0, "duration": 6, "tags": ["help", "duty"] },
+    {
+      "id": "HideWhenScared",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["fear", "safety"],
+      "charge_capacity": 1.3,
+      "charge_leak": 0.985,
+      "pulse_budget_scale": 0.85
+    },
+    {
+      "id": "ImitateRitual",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["ritual", "doctrine", "loyalty"],
+      "charge_capacity": 1.1,
+      "charge_leak": 0.97,
+      "pulse_budget_scale": 0.92
+    }
   ],
   "edges": [
     ["FollowCaregiver", "ExploreNearby", 0.7],
