@@ -49,7 +49,7 @@ describe('resource gathering', () => {
     expect(agent.carriedResources.wood).toBeGreaterThan(initialWood);
   });
 
-  it('prioritizes build-forage when the household lacks wood', () => {
+  it('prioritizes resource harvesting for wood when the household lacks it', () => {
     const simulation = createSimulationState({ agentCount: 6, worldSize: [24, 24], seed: 'housing-wood-demand' });
     const adult = simulation.agents.find((entry) => entry.lifeStage === 'adult');
     expect(adult).toBeDefined();
@@ -101,6 +101,10 @@ describe('resource gathering', () => {
       simulation.rng.tick,
     );
 
-    expect(adult.movement.behaviorId).toBe('build-forage');
+    expect(adult.movement.behaviorId).toBe('resource-harvest');
+    expect(adult.movement.data).toBeDefined();
+    if (adult.movement.data) {
+      expect(adult.movement.data.resourceType).toBe('wood');
+    }
   });
 });
