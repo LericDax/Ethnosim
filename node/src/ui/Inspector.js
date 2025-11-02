@@ -295,6 +295,47 @@ export class Inspector {
     this.brainPlasticityContainer.appendChild(this.brainPlasticityEmpty);
     this.brainPlasticityEmpty.style.display = 'none';
     this.brainSection.content.appendChild(this.brainPlasticityContainer);
+    this.brainAssociationsContainer = document.createElement('div');
+    Object.assign(this.brainAssociationsContainer.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '8px',
+      borderRadius: '6px',
+      background: 'rgba(15, 23, 42, 0.55)',
+      border: '1px solid rgba(148, 163, 184, 0.25)',
+      fontFamily: 'Inter, system-ui, sans-serif',
+      color: 'rgba(226, 232, 240, 0.9)',
+      fontSize: '12px',
+    });
+    this.brainAssociationsHeading = document.createElement('div');
+    this.brainAssociationsHeading.textContent = 'Recent Associations';
+    Object.assign(this.brainAssociationsHeading.style, {
+      fontSize: '12px',
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      color: 'rgba(224, 242, 254, 0.85)',
+    });
+    this.brainAssociationsList = document.createElement('div');
+    Object.assign(this.brainAssociationsList.style, {
+      display: 'grid',
+      gridTemplateColumns: 'minmax(0, 1fr) minmax(0, auto) minmax(0, auto)',
+      gap: '4px 12px',
+      fontFamily: '"IBM Plex Mono", monospace',
+      fontSize: '11px',
+      color: 'rgba(226, 232, 240, 0.92)',
+    });
+    this.brainAssociationsEmpty = document.createElement('div');
+    this.brainAssociationsEmpty.textContent = 'No transient associations';
+    Object.assign(this.brainAssociationsEmpty.style, {
+      fontSize: '11px',
+      color: 'rgba(148, 163, 184, 0.75)',
+    });
+    this.brainAssociationsContainer.appendChild(this.brainAssociationsHeading);
+    this.brainAssociationsContainer.appendChild(this.brainAssociationsList);
+    this.brainAssociationsContainer.appendChild(this.brainAssociationsEmpty);
+    this.brainAssociationsList.style.display = 'none';
+    this.brainSection.content.appendChild(this.brainAssociationsContainer);
     this.brainSection.root.style.display = 'none';
 
     this.identitySection = this._createInfoSection('Identity');
@@ -345,6 +386,9 @@ export class Inspector {
         this.brainViewer.setLabel(null);
       }
       this.brainSection.root.style.display = 'none';
+      if (this.brainAssociationsContainer) {
+        this.brainAssociationsContainer.style.display = 'none';
+      }
       this._configureSectionsForType(null);
       if (this.closeButton) {
         this.closeButton.style.display = 'none';
@@ -678,6 +722,9 @@ export class Inspector {
         this.brainViewer.setLabel(options.label ?? null);
       }
       this.brainSection.root.style.display = 'none';
+      if (this.brainAssociationsContainer) {
+        this.brainAssociationsContainer.style.display = 'none';
+      }
       return;
     }
 
@@ -698,10 +745,12 @@ export class Inspector {
       (brainData && typeof brainData.fillRatios === 'object' ? brainData.fillRatios : null);
     const plasticitySnapshot = this._resolvePlasticitySnapshot(brainData);
     const viewerEdges = this._buildViewerEdges(graph, plasticitySnapshot.edges);
+    const transientEdges = Array.isArray(brainData?.transientEdges) ? brainData.transientEdges : [];
 
     this.brainViewer.setData({
       nodes: graph.nodes.map((node) => ({ ...node })),
       edges: viewerEdges,
+      transientEdges,
       currentNodeId,
       decision,
       transition: summary?.transition ?? null,
@@ -710,6 +759,7 @@ export class Inspector {
       plasticity: plasticitySnapshot,
     });
     this._updatePlasticityDetails(plasticitySnapshot);
+    this._updateRecentAssociationsList(transientEdges, graph);
     this.brainSection.root.style.display = 'flex';
   }
 
@@ -889,6 +939,74 @@ export class Inspector {
         summaryTick != null ? `${legendText} (tick ${summaryTick})` : legendText;
     }
     this.brainPlasticityContainer.title = `${sorted.length} plastic edge adjustments shown.`;
+  }
+
+  _updateRecentAssociationsList(transientEdges, graph) {
+    if (!this.brainAssociationsContainer || !this.brainAssociationsList || !this.brainAssociationsEmpty) {
+      return;
+    }
+
+    const traceEdges = Array.isArray(transientEdges)
+      ? transientEdges
+          .filter((edge) => edge && (edge.kind ?? 'trace') === 'trace')
+          .map((edge) => ({
+            from: edge.from ?? null,
+            to: edge.to ?? null,
+            weight: Number(edge.weight ?? 0),
+            ttl: Number(edge.remainingTicks ?? edge.ttl ?? 0),
+          }))
+          .filter((edge) => edge.from && edge.to && edge.weight > 0)
+      : [];
+
+    if (!traceEdges.length) {
+      this.brainAssociationsContainer.style.display = 'none';
+      this.brainAssociationsList.style.display = 'none';
+      this.brainAssociationsList.innerHTML = '';
+      this.brainAssociationsEmpty.style.display = 'block';
+      return;
+    }
+
+    const labelMap = new Map();
+    if (graph && Array.isArray(graph.nodes)) {
+      for (const node of graph.nodes) {
+        if (node && node.id) {
+          labelMap.set(node.id, node.label ?? node.id);
+        }
+      }
+    }
+
+    const sorted = traceEdges
+      .map((edge) => ({
+        ...edge,
+        fromLabel: labelMap.get(edge.from) ?? edge.from,
+        toLabel: labelMap.get(edge.to) ?? edge.to,
+      }))
+      .sort((a, b) => b.weight - a.weight || String(a.toLabel).localeCompare(String(b.toLabel)))
+      .slice(0, 5);
+
+    this.brainAssociationsContainer.style.display = 'flex';
+    this.brainAssociationsList.style.display = 'grid';
+    this.brainAssociationsList.innerHTML = '';
+    this.brainAssociationsEmpty.style.display = 'none';
+
+    for (const entry of sorted) {
+      const pairLabel = document.createElement('div');
+      pairLabel.textContent = `${entry.fromLabel} → ${entry.toLabel}`;
+      const weightEl = document.createElement('div');
+      weightEl.textContent = entry.weight.toFixed(2);
+      weightEl.style.textAlign = 'right';
+      weightEl.style.color = '#fde68a';
+      weightEl.title = 'Association weight';
+      const ttlValue = Number.isFinite(entry.ttl) ? Math.max(0, Math.round(entry.ttl)) : 0;
+      const ttlEl = document.createElement('div');
+      ttlEl.textContent = ttlValue > 0 ? `${ttlValue} ticks` : 'fading';
+      ttlEl.style.textAlign = 'right';
+      ttlEl.style.color = 'rgba(226, 232, 240, 0.75)';
+      ttlEl.title = 'Remaining association lifetime';
+      this.brainAssociationsList.appendChild(pairLabel);
+      this.brainAssociationsList.appendChild(weightEl);
+      this.brainAssociationsList.appendChild(ttlEl);
+    }
   }
 
   _applyRootStyles() {

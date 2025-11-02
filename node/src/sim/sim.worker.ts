@@ -233,6 +233,15 @@ interface SnapshotBrainPulse {
   family?: string;
 }
 
+interface SnapshotTransientEdge {
+  from: string;
+  to: string;
+  weight: number;
+  kind: 'trace' | 'jump';
+  ttl?: number;
+  remainingTicks?: number;
+}
+
 interface SnapshotBrainFill {
   ratios: Record<string, number>;
   containsRecentCharge: boolean;
@@ -259,6 +268,7 @@ interface SnapshotBrainData {
   fillRatios: Record<string, number>;
   nodeFill?: SnapshotBrainFill | null;
   plasticity: SnapshotBrainPlasticity;
+  transientEdges: SnapshotTransientEdge[];
 }
 
 interface SnapshotAgent {
@@ -1691,6 +1701,39 @@ function extractSnapshotBrainPulses(brain: BrainState): SnapshotBrainPulse[] {
     .slice(0, MAX_SNAPSHOT_PULSES);
 }
 
+function extractSnapshotTransientEdges(brain: BrainState): SnapshotTransientEdge[] {
+  const edges: SnapshotTransientEdge[] = [];
+  for (const activeEdge of brain.activeJumpEdges.values()) {
+    for (const sourceId of activeEdge.sourceNodeIds) {
+      if (!sourceId) {
+        continue;
+      }
+      edges.push({
+        from: sourceId,
+        to: activeEdge.targetNodeId,
+        weight: activeEdge.weight,
+        kind: 'jump',
+        ttl: 0,
+        remainingTicks: 0,
+      });
+    }
+  }
+  for (const association of brain.recentAssociations.values()) {
+    if (!association) {
+      continue;
+    }
+    edges.push({
+      from: association.sourceId,
+      to: association.targetId,
+      weight: association.weight,
+      kind: 'trace',
+      ttl: association.ttl,
+      remainingTicks: association.ttl,
+    });
+  }
+  return edges;
+}
+
 function extractSnapshotFillRatios(brain: BrainState): SnapshotBrainFill | null {
   const combined = new Map<
     string,
@@ -2013,6 +2056,7 @@ function createBrainSnapshot(
   const fillInfo = extractSnapshotFillRatios(brain);
   const fillRatios = fillInfo?.ratios ?? {};
   const plasticity = extractSnapshotPlasticity(brain);
+  const transientEdges = extractSnapshotTransientEdges(brain);
   const transition: SnapshotBrainTransitionTiming = {
     durationTicks: safeDurationTicks,
     remainingTicks,
@@ -2040,6 +2084,7 @@ function createBrainSnapshot(
     fillRatios,
     nodeFill: fillInfo,
     plasticity,
+    transientEdges,
   };
 }
 
