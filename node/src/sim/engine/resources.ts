@@ -97,7 +97,10 @@ export function removeResourceAmount(
 
 function ensureBundleKeys(bundle: ResourceBundle): void {
   for (const type of RESOURCE_TYPES) {
-    if (!Number.isFinite(bundle[type] ?? 0)) {
+    const amount = sanitizeResourceAmount(bundle[type]);
+    if (amount > 0) {
+      bundle[type] = amount;
+    } else {
       bundle[type] = 0;
     }
   }
