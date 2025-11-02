@@ -143,6 +143,14 @@ export interface RecentNodeChargeState extends NodeChargeState {
   ttl: number;
 }
 
+export interface RecentAssociationState {
+  sourceId: string;
+  targetId: string;
+  weight: number;
+  ttl: number;
+  decay: number;
+}
+
 export interface BrainState {
   brainId: string;
   currentNodeId: string;
@@ -156,6 +164,7 @@ export interface BrainState {
   pendingPulses: BrainPulse[];
   nodeCharge: Map<string, NodeChargeState>;
   recentCharge: Map<string, RecentNodeChargeState>;
+  recentAssociations: Map<string, RecentAssociationState>;
   pulseEvents: BrainPulseEvent[];
   nextPulseId: number;
 }
@@ -181,6 +190,14 @@ interface SerializedRecentNodeChargeState extends SerializedNodeChargeState {
   ttl: number;
 }
 
+interface SerializedRecentAssociationState {
+  sourceId: string;
+  targetId: string;
+  weight: number;
+  ttl: number;
+  decay: number;
+}
+
 export interface SerializedBrainState {
   brainId: string;
   currentNodeId: string;
@@ -194,6 +211,7 @@ export interface SerializedBrainState {
   pendingPulses: SerializedBrainPulse[];
   nodeCharge: Record<string, SerializedNodeChargeState>;
   recentCharge: Record<string, SerializedRecentNodeChargeState>;
+  recentAssociations: SerializedRecentAssociationState[];
   pulseEvents: BrainPulseEvent[];
   nextPulseId: number;
 }
@@ -246,6 +264,11 @@ const DEFAULT_CHARGE_LEAK = PULSE_LEAK_MULTIPLIER;
 const DEFAULT_PULSE_BUDGET_SCALE = 1;
 const MIN_CHARGE_VALUE = 1e-4;
 const RECENT_CHARGE_TTL = 2;
+const RECENT_ASSOCIATION_TTL = 6;
+const RECENT_ASSOCIATION_DECAY = 0.72;
+const RECENT_ASSOCIATION_WEIGHT_SCALE = 1.1;
+const RECENT_ASSOCIATION_MAX_WEIGHT = 1.35;
+const RECENT_ASSOCIATION_MIN_WEIGHT = 0.05;
 
 const RAW_BRAINS: BrainGraphDefinition[] = [
   parseBrainJson(babyMindRaw),
@@ -611,6 +634,7 @@ export function createBrainState(brainId: string): BrainState {
     pendingPulses: [],
     nodeCharge: new Map<string, NodeChargeState>(),
     recentCharge: new Map<string, RecentNodeChargeState>(),
+    recentAssociations: new Map<string, RecentAssociationState>(),
     pulseEvents: [],
     nextPulseId: 1,
   };
@@ -661,6 +685,17 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
     };
   }
 
+  const recentAssociations: SerializedRecentAssociationState[] = [];
+  for (const association of state.recentAssociations.values()) {
+    recentAssociations.push({
+      sourceId: association.sourceId,
+      targetId: association.targetId,
+      weight: association.weight,
+      ttl: association.ttl,
+      decay: association.decay,
+    });
+  }
+
   return {
     brainId: state.brainId,
     currentNodeId: state.currentNodeId,
@@ -689,6 +724,7 @@ export function serializeBrainState(state: BrainState): SerializedBrainState {
     })),
     nodeCharge,
     recentCharge,
+    recentAssociations,
     pulseEvents: state.pulseEvents.map((event) => ({
       id: event.id,
       edgeKey: event.edgeKey,
@@ -781,6 +817,31 @@ export function restoreBrainState(serialized: SerializedBrainState): BrainState 
       });
     }
   }
+  base.recentAssociations = new Map();
+  for (const entry of serialized.recentAssociations ?? []) {
+    if (!entry) {
+      continue;
+    }
+    const sourceId = entry.sourceId;
+    const targetId = entry.targetId;
+    if (!sourceId || !targetId) {
+      continue;
+    }
+    const weight = Number(entry.weight);
+    const ttl = Number.isFinite(entry.ttl) ? Math.max(0, Math.round(entry.ttl)) : 0;
+    const decay = Number.isFinite(entry.decay) && entry.decay > 0 && entry.decay < 1 ? entry.decay : RECENT_ASSOCIATION_DECAY;
+    if (weight <= MIN_CHARGE_VALUE || ttl <= 0) {
+      continue;
+    }
+    const key = makeEdgeKey(sourceId, targetId);
+    base.recentAssociations.set(key, {
+      sourceId,
+      targetId,
+      weight,
+      ttl,
+      decay,
+    });
+  }
   base.pulseEvents = (serialized.pulseEvents ?? []).map((event) => {
     const travelDuration = Math.max(1, Math.round(event.travelDuration ?? 1));
     const payload = Number.isFinite(event.payload) ? event.payload : event.strength ?? 0;
@@ -848,6 +909,7 @@ export function tickBrain(
   const brain = requireBrain(state.brainId);
   advancePlasticityState(state.plasticity);
   updateJumpEdges(state, brain, multipliers, moodLevels);
+  refreshDynamicEdgeCache(state);
   let decision: BrainDecision | null = null;
   const metadata = requireNode(brain, state.currentNodeId);
   const candidates = evaluateCandidates(brain, state, state.currentNodeId, multipliers);
@@ -875,6 +937,8 @@ export function tickBrain(
   const deposits = advancePendingPulses(state, brain);
   applyNodeChargeDecay(state, brain);
   decayRecentChargeCache(state);
+  decayRecentAssociations(state);
+  refreshDynamicEdgeCache(state);
   for (const [targetId, strength] of deposits.entries()) {
     if (strength <= 0) {
       continue;
@@ -914,6 +978,7 @@ export function tickBrain(
     registerPlasticityOutcome(state.plasticity, fromNodeId, nextNodeId, 1);
     state.lastDecision = decision;
     commitBrainTransition(state, nextNodeId);
+    refreshDynamicEdgeCache(state);
   } else {
     const bestCandidate = candidates[0];
     if (bestCandidate) {
@@ -1293,6 +1358,12 @@ function commitBrainTransition(state: BrainState, nextNodeId: string): void {
         capacity: normalizedCapacity,
         ttl: RECENT_CHARGE_TTL,
       });
+      if (nodeId !== nextNodeId) {
+        const weight = computeAssociationWeight(normalizedValue, normalizedCapacity);
+        if (weight > 0) {
+          registerRecentAssociation(state, nextNodeId, nodeId, weight);
+        }
+      }
     }
   }
   state.currentNodeId = nextNodeId;
@@ -1323,11 +1394,36 @@ function evaluateCandidates(
   multipliers: BrainMultiplierSet,
 ): BrainDecisionFactor[] {
   const baseEdges = brain.edgesFrom.get(sourceNodeId) ?? [];
-  const jumpEdges = state.dynamicEdgesFrom.get(sourceNodeId) ?? [];
-  const sourceEdges = baseEdges.length > 0 || jumpEdges.length > 0 ? [...baseEdges, ...jumpEdges] : [];
-  if (sourceEdges.length === 0) {
+  const dynamicEdges = state.dynamicEdgesFrom.get(sourceNodeId) ?? [];
+  if (baseEdges.length === 0 && dynamicEdges.length === 0) {
     return [];
   }
+
+  const merged = new Map<string, BrainEdgeMetadata>();
+  for (const edge of baseEdges) {
+    if (!edge) {
+      continue;
+    }
+    merged.set(edge.targetId, { targetId: edge.targetId, weight: edge.weight });
+  }
+  for (const edge of dynamicEdges) {
+    if (!edge) {
+      continue;
+    }
+    const existing = merged.get(edge.targetId);
+    if (existing) {
+      const combinedWeight = Math.max(existing.weight, edge.weight);
+      merged.set(edge.targetId, { targetId: edge.targetId, weight: combinedWeight });
+    } else {
+      merged.set(edge.targetId, { targetId: edge.targetId, weight: edge.weight });
+    }
+  }
+
+  if (merged.size === 0) {
+    return [];
+  }
+
+  const sourceEdges = Array.from(merged.values());
 
   const candidates: BrainDecisionFactor[] = [];
   for (const edge of sourceEdges) {
@@ -1416,8 +1512,6 @@ function updateJumpEdges(
 
     state.activeJumpEdges.set(definition.id, resolved);
   }
-
-  state.dynamicEdgesFrom = rebuildDynamicEdgeMap(state.activeJumpEdges);
 }
 
 function resolveMoodLevel(
@@ -1492,6 +1586,127 @@ function rebuildDynamicEdgeMap(
     }
   }
   return map;
+}
+
+function computeAssociationWeight(value: number, capacity: number): number {
+  if (value <= MIN_CHARGE_VALUE) {
+    return 0;
+  }
+  const safeCapacity = capacity > MIN_CHARGE_VALUE ? capacity : DEFAULT_CHARGE_CAPACITY;
+  const ratio = safeCapacity > MIN_CHARGE_VALUE ? clamp01(value / safeCapacity) : clamp01(value);
+  if (ratio <= 0) {
+    return 0;
+  }
+  const scaled = ratio * RECENT_ASSOCIATION_WEIGHT_SCALE;
+  if (scaled <= RECENT_ASSOCIATION_MIN_WEIGHT) {
+    return 0;
+  }
+  return clamp(scaled, RECENT_ASSOCIATION_MIN_WEIGHT, RECENT_ASSOCIATION_MAX_WEIGHT);
+}
+
+function registerRecentAssociation(
+  state: BrainState,
+  sourceNodeId: string,
+  targetNodeId: string,
+  weight: number,
+): void {
+  if (!sourceNodeId || !targetNodeId || sourceNodeId === targetNodeId) {
+    return;
+  }
+  if (weight <= RECENT_ASSOCIATION_MIN_WEIGHT) {
+    return;
+  }
+  const key = makeEdgeKey(sourceNodeId, targetNodeId);
+  const existing = state.recentAssociations.get(key);
+  const nextWeight = existing
+    ? clamp(Math.max(existing.weight, weight), RECENT_ASSOCIATION_MIN_WEIGHT, RECENT_ASSOCIATION_MAX_WEIGHT)
+    : clamp(weight, RECENT_ASSOCIATION_MIN_WEIGHT, RECENT_ASSOCIATION_MAX_WEIGHT);
+  const nextTtl = Math.max(RECENT_ASSOCIATION_TTL, existing?.ttl ?? 0);
+  const existingDecay = existing?.decay;
+  const decay = typeof existingDecay === 'number' && existingDecay > 0 && existingDecay < 1
+    ? existingDecay
+    : RECENT_ASSOCIATION_DECAY;
+  state.recentAssociations.set(key, {
+    sourceId: sourceNodeId,
+    targetId: targetNodeId,
+    weight: nextWeight,
+    ttl: nextTtl,
+    decay,
+  });
+}
+
+function buildAssociationEdgeMap(state: BrainState): Map<string, BrainEdgeMetadata[]> {
+  const map = new Map<string, BrainEdgeMetadata[]>();
+  for (const association of state.recentAssociations.values()) {
+    if (!association) {
+      continue;
+    }
+    if (association.ttl <= 0 || association.weight <= RECENT_ASSOCIATION_MIN_WEIGHT) {
+      continue;
+    }
+    if (!map.has(association.sourceId)) {
+      map.set(association.sourceId, []);
+    }
+    map.get(association.sourceId)!.push({
+      targetId: association.targetId,
+      weight: association.weight,
+    });
+  }
+  return map;
+}
+
+function mergeDynamicEdgeSources(
+  ...sources: Array<Map<string, BrainEdgeMetadata[]>>
+): Map<string, BrainEdgeMetadata[]> {
+  const map = new Map<string, BrainEdgeMetadata[]>();
+  for (const source of sources) {
+    for (const [nodeId, edges] of source.entries()) {
+      if (!map.has(nodeId)) {
+        map.set(nodeId, []);
+      }
+      map.get(nodeId)!.push(...edges);
+    }
+  }
+  return map;
+}
+
+function refreshDynamicEdgeCache(state: BrainState): void {
+  const jumpEdges = rebuildDynamicEdgeMap(state.activeJumpEdges);
+  const associationEdges = buildAssociationEdgeMap(state);
+  state.dynamicEdgesFrom = mergeDynamicEdgeSources(jumpEdges, associationEdges);
+}
+
+function decayRecentAssociations(state: BrainState): void {
+  if (state.recentAssociations.size === 0) {
+    return;
+  }
+  const entries = Array.from(state.recentAssociations.entries());
+  for (const [key, association] of entries) {
+    if (!association) {
+      state.recentAssociations.delete(key);
+      continue;
+    }
+    if (!state.recentCharge.has(association.targetId)) {
+      state.recentAssociations.delete(key);
+      continue;
+    }
+    const decay = Number.isFinite(association.decay) && association.decay > 0 && association.decay < 1
+      ? association.decay
+      : RECENT_ASSOCIATION_DECAY;
+    const nextWeight = association.weight * decay;
+    const nextTtl = Math.max(0, Math.round(association.ttl ?? 0) - 1);
+    if (nextTtl <= 0 || nextWeight <= RECENT_ASSOCIATION_MIN_WEIGHT) {
+      state.recentAssociations.delete(key);
+      continue;
+    }
+    state.recentAssociations.set(key, {
+      sourceId: association.sourceId,
+      targetId: association.targetId,
+      weight: nextWeight,
+      ttl: nextTtl,
+      decay,
+    });
+  }
 }
 
 function restorePlasticityState(serialized: SerializedPlasticityState | undefined): PlasticityState {

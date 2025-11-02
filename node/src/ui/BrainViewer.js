@@ -8,6 +8,9 @@ const EDGE_POTENTIATION_COLOR = 'rgba(56, 189, 248, 0.85)';
 const EDGE_POTENTIATION_GLOW = 'rgba(125, 211, 252, 0.42)';
 const EDGE_DEPRESSION_COLOR = 'rgba(248, 113, 113, 0.78)';
 const EDGE_DEPRESSION_GLOW = 'rgba(251, 113, 133, 0.38)';
+const TRACE_EDGE_COLOR = 'rgba(253, 224, 71, 0.85)';
+const TRACE_EDGE_GLOW = 'rgba(253, 224, 71, 0.38)';
+const TRACE_EDGE_DASH = [6, 4];
 const NODE_FILL = 'rgba(30, 41, 59, 0.92)';
 const NODE_STROKE = 'rgba(148, 163, 184, 0.55)';
 const NODE_HIGHLIGHT_FILL = '#facc15';
@@ -100,6 +103,16 @@ function computeDataSignature(data) {
     )
     .sort()
     .join(';');
+  const transientPart = Array.isArray(data.transientEdges)
+    ? data.transientEdges
+        .map((edge) =>
+          `${edge?.kind ?? 'trace'}:${edge?.from ?? ''}->${edge?.to ?? ''}:${Number(edge?.weight ?? 0).toFixed(3)}:${Number(
+            edge?.ttl ?? edge?.remainingTicks ?? 0,
+          ).toFixed(0)}`,
+        )
+        .sort()
+        .join(';')
+    : 'none';
   const current = data.currentNodeId ?? '';
   const decision = data.decision
     ? `${data.decision.fromNodeId ?? ''}->${data.decision.chosenNodeId ?? ''}|${(data.decision.candidates ?? []).length}`
@@ -146,7 +159,7 @@ function computeDataSignature(data) {
   const plasticityTickPart = Number.isFinite(data?.plasticity?.tick)
     ? Number(data.plasticity.tick).toFixed(0)
     : 'none';
-  return `${nodePart}__${edgePart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}__${plasticityTickPart}|${plasticityEdgesPart}`;
+  return `${nodePart}__${edgePart}__${transientPart}__${current}__${decision}__${pulsesPart}__${fillPart}__${fillMetaPart}__${plasticityTickPart}|${plasticityEdgesPart}`;
 }
 
 function resolveClampValue(viewportClamp, minHeight) {
@@ -361,6 +374,7 @@ export class BrainViewer {
       ? {
           nodes: data.nodes,
           edges: data.edges,
+          transientEdges: Array.isArray(data.transientEdges) ? data.transientEdges : [],
           currentNodeId: data.currentNodeId ?? data.summary?.nodeId ?? null,
           decision: data.decision ?? null,
           transition,
@@ -401,7 +415,7 @@ export class BrainViewer {
       return String(a.id).localeCompare(String(b.id));
     });
 
-    this._edges = [...(this._data.edges ?? [])]
+    const baseEdges = [...(this._data.edges ?? [])]
       .map((edge) => {
         const baseWeight = Number(edge.baseWeight ?? edge.weight ?? 0);
         const adjustment = Number(edge.adjustment ?? 0);
@@ -418,9 +432,32 @@ export class BrainViewer {
           adjustment: sanitizedAdjustment,
           weight: Math.max(0, sanitizedWeight),
           usageCount: Number.isFinite(usageCount) ? usageCount : 0,
+          kind: edge.kind ?? 'base',
+          ttl: null,
         };
       })
       .filter((edge) => edge.fromId && edge.toId);
+    const transientEdges = Array.isArray(this._data.transientEdges)
+      ? this._data.transientEdges
+          .map((edge) => {
+            const weight = Number(edge?.weight ?? 0);
+            const remaining = Number(edge?.remainingTicks ?? edge?.ttl ?? 0);
+            const kind = edge?.kind ?? 'trace';
+            return {
+              id: `${kind}:${edge?.from ?? ''}->${edge?.to ?? ''}`,
+              fromId: edge?.from ?? null,
+              toId: edge?.to ?? null,
+              baseWeight: weight,
+              adjustment: 0,
+              weight: Math.max(0, weight),
+              usageCount: 0,
+              kind,
+              ttl: Number.isFinite(remaining) ? Math.max(0, remaining) : null,
+            };
+          })
+          .filter((edge) => edge.fromId && edge.toId)
+      : [];
+    this._edges = [...baseEdges, ...transientEdges];
 
     const adjustmentEdges = this._edges.filter((edge) => Math.abs(edge.adjustment) > 1e-6);
     if (adjustmentEdges.length > 0) {
@@ -798,6 +835,8 @@ export class BrainViewer {
           usageCount,
           adjustmentMagnitude: Math.abs(adjustment),
           length: Math.hypot(to.x - from.x, to.y - from.y),
+          kind: edge.kind ?? 'base',
+          ttl: edge.ttl ?? null,
         };
       })
       .filter(Boolean);
@@ -1337,16 +1376,23 @@ export class BrainViewer {
       const hasAdjustment = adjustmentRatio > 0;
       const isPotentiated = adjustment > 0;
       const isSuppressed = adjustment < 0;
+      const kind = segment.kind ?? 'base';
+      const isTrace = kind === 'trace';
+      const isJump = kind === 'jump';
 
       let strokeColor = EDGE_COLOR;
-      if (isPotentiated) {
+      if (isTrace) {
+        strokeColor = TRACE_EDGE_COLOR;
+      } else if (isPotentiated) {
         strokeColor = EDGE_POTENTIATION_COLOR;
       } else if (isSuppressed) {
         strokeColor = EDGE_DEPRESSION_COLOR;
       }
 
       let alpha = 0.45 + Math.min(0.35, weightMagnitude * 0.25);
-      if (hasAdjustment) {
+      if (isTrace) {
+        alpha = 0.55 + Math.min(0.35, weightMagnitude * 0.3);
+      } else if (hasAdjustment) {
         alpha = Math.max(alpha, 0.45 + adjustmentRatio * 0.45);
       }
       if (isDecision) {
@@ -1354,13 +1400,20 @@ export class BrainViewer {
       }
 
       let lineWidth = 1.6 + weightMagnitude * 0.6;
-      if (hasAdjustment) {
+      if (isTrace) {
+        lineWidth = 2.2 + weightMagnitude * 0.5;
+      } else if (hasAdjustment) {
         lineWidth += adjustmentRatio * 1.2;
       }
       if (isDecision) {
         lineWidth = Math.max(lineWidth, 3 + adjustmentRatio * 1.2);
       }
 
+      if (isTrace) {
+        ctx.setLineDash(TRACE_EDGE_DASH);
+      } else if (isJump) {
+        ctx.setLineDash([4, 6]);
+      }
       ctx.globalAlpha = alpha;
       ctx.lineWidth = lineWidth;
       ctx.strokeStyle = isDecision ? EDGE_DECISION_COLOR : strokeColor;
@@ -1368,7 +1421,15 @@ export class BrainViewer {
       ctx.moveTo(segment.from.x, segment.from.y);
       ctx.lineTo(segment.to.x, segment.to.y);
       ctx.stroke();
-      if (isDecision || hasAdjustment) {
+      if (isTrace) {
+        ctx.globalAlpha = Math.min(0.6, alpha * 0.75);
+        ctx.strokeStyle = TRACE_EDGE_GLOW;
+        ctx.lineWidth = lineWidth + 2;
+        ctx.beginPath();
+        ctx.moveTo(segment.from.x, segment.from.y);
+        ctx.lineTo(segment.to.x, segment.to.y);
+        ctx.stroke();
+      } else if (isDecision || hasAdjustment) {
         const glowStrength = isDecision ? pulse : adjustmentRatio;
         ctx.globalAlpha = isDecision ? 0.45 * pulse : 0.35 + glowStrength * 0.25;
         ctx.strokeStyle = isDecision
