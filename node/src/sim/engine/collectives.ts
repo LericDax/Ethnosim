@@ -2,6 +2,7 @@ import {
   createBrainState,
   tickBrain,
   getNodeMetadata,
+  registerDecisionOutcome,
   type BrainDecision,
   type BrainState,
 } from './brain.ts';
@@ -1343,10 +1344,28 @@ function getResourceDemandTag(type: ResourceType): string {
 
 function applyHouseResourceDemand(house: HouseState, pendingAssignments: number): void {
   house.stockpiles = ensureResourceBundle(house.stockpiles);
+  const previousNeeds = ensureResourceBundle(house.resourceNeeds);
+  const previousTotalNeed = computeTotalNeed(previousNeeds);
   const needs = computeHouseResourceNeeds(house, pendingAssignments);
+  const nextTotalNeed = computeTotalNeed(needs);
   house.resourceNeeds = needs;
 
-  const totalNeed = RESOURCE_TYPES.reduce((sum, type) => sum + (needs[type] ?? 0), 0);
+  if (Math.abs(nextTotalNeed - previousTotalNeed) > 1e-3) {
+    const decision = house.brainDecision ?? house.brain.lastDecision;
+    if (decision) {
+      const magnitude = Math.min(1, Math.abs(nextTotalNeed - previousTotalNeed));
+      registerDecisionOutcome(house.brain, {
+        category: 'directive',
+        magnitude,
+        sign: nextTotalNeed < previousTotalNeed ? 1 : -1,
+        fromNodeId: decision.fromNodeId,
+        toNodeId: decision.chosenNodeId,
+        tags: ['house', `house:${house.brain.currentNodeId}`],
+      });
+    }
+  }
+
+  const totalNeed = nextTotalNeed;
   for (const type of RESOURCE_TYPES) {
     const tag = getResourceDemandTag(type);
     const intensity = needs[type] ?? 0;
@@ -1387,10 +1406,28 @@ function computeHouseResourceNeeds(house: HouseState, pendingAssignments: number
 
 function applyCityResourceDemand(city: CityState): void {
   city.stockpiles = ensureResourceBundle(city.stockpiles);
+  const previousNeeds = ensureResourceBundle(city.resourceNeeds);
+  const previousTotalNeed = computeTotalNeed(previousNeeds);
   const needs = computeCityResourceNeeds(city);
+  const nextTotalNeed = computeTotalNeed(needs);
   city.resourceNeeds = needs;
 
-  const totalNeed = RESOURCE_TYPES.reduce((sum, type) => sum + (needs[type] ?? 0), 0);
+  if (Math.abs(nextTotalNeed - previousTotalNeed) > 1e-3) {
+    const decision = city.brainDecision ?? city.brain.lastDecision;
+    if (decision) {
+      const magnitude = Math.min(1, Math.abs(nextTotalNeed - previousTotalNeed));
+      registerDecisionOutcome(city.brain, {
+        category: 'directive',
+        magnitude,
+        sign: nextTotalNeed < previousTotalNeed ? 1 : -1,
+        fromNodeId: decision.fromNodeId,
+        toNodeId: decision.chosenNodeId,
+        tags: ['city', `city:${city.brain.currentNodeId}`],
+      });
+    }
+  }
+
+  const totalNeed = nextTotalNeed;
   for (const type of RESOURCE_TYPES) {
     const tag = getResourceDemandTag(type);
     const intensity = needs[type] ?? 0;
@@ -1424,6 +1461,20 @@ function computeCityResourceNeeds(city: CityState): ResourceBundle {
   needs.ore = Math.max(0, (oreTarget - getResourceAmount(stock, 'ore')) / Math.max(1, oreTarget));
 
   return needs;
+}
+
+function computeTotalNeed(needs: ResourceBundle | null | undefined): number {
+  if (!needs) {
+    return 0;
+  }
+  let total = 0;
+  for (const type of RESOURCE_TYPES) {
+    const value = Number(needs[type]);
+    if (Number.isFinite(value) && value > 0) {
+      total += value;
+    }
+  }
+  return total;
 }
 
 function applyDemandMultipliers(
