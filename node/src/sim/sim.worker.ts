@@ -882,6 +882,7 @@ function createAgents(
     const traitProfile = createTraitProfile(temperament);
     brain.traitFlags = [...traitProfile.traitFlags];
     const brainMetadata = getCurrentNodeMetadata(brain);
+    const brainMultipliers = buildBrainMultipliers(traitProfile);
     const chromosomes = sampleChromosomes(chromosomeRegistry, stream);
     const reproductiveRoles = [...chromosomes.roles];
     const genderIdentity = sampleGenderIdentity(stream.nextFloat());
@@ -909,7 +910,7 @@ function createAgents(
       caregiverId: null,
       explorationBias: stream.nextFloat(),
       brain,
-      brainMultipliers: buildBrainMultipliers(traitProfile),
+      brainMultipliers,
       brainNodeDuration: brainMetadata.duration,
       brainDecision: null,
       chromosomes,
@@ -923,7 +924,7 @@ function createAgents(
       parents: [],
       temperament,
       traitFlags: [...traitProfile.traitFlags],
-      moods: buildInitialMoodState(traitProfile),
+      moods: buildInitialMoodState(traitProfile, brainMultipliers),
       caregiverProximityGraceTicks: 0,
       houseId: null,
       carriedResources: createResourceBundle(),
@@ -982,7 +983,9 @@ function shuffleInPlace<T>(array: T[], stream: RngStream): void {
   }
 }
 
-function buildBrainMultipliers(profile: ReturnType<typeof createTraitProfile>): BrainMultiplierSet {
+export function buildBrainMultipliers(
+  profile: ReturnType<typeof createTraitProfile>,
+): BrainMultiplierSet {
   const multipliers: BrainMultiplierSet = { demand: {}, relationship: {} };
   if (profile.multipliers.mood) {
     multipliers.mood = { ...profile.multipliers.mood };
@@ -993,8 +996,33 @@ function buildBrainMultipliers(profile: ReturnType<typeof createTraitProfile>): 
   return multipliers;
 }
 
-function buildInitialMoodState(profile: ReturnType<typeof createTraitProfile>): Record<string, number> {
-  const moods: Record<string, number> = { ...profile.moodLevels };
+export function buildInitialMoodState(
+  profile: ReturnType<typeof createTraitProfile>,
+  brainMultipliers: BrainMultiplierSet,
+): Record<string, number> {
+  const moods: Record<string, number> = {};
+
+  const registerMoodKey = (key: string, value: unknown): void => {
+    if (!key) {
+      return;
+    }
+    if (key in moods) {
+      return;
+    }
+    const numeric = Number(value);
+    moods[key] = Number.isFinite(numeric) ? numeric : 0;
+  };
+
+  for (const [key, value] of Object.entries(profile.moodLevels)) {
+    registerMoodKey(key, value);
+  }
+
+  if (brainMultipliers.mood) {
+    for (const key of Object.keys(brainMultipliers.mood)) {
+      registerMoodKey(key, 0);
+    }
+  }
+
   moods[UNHOUSED_MOOD_KEY] = 0;
   return moods;
 }

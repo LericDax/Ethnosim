@@ -156,6 +156,7 @@ export function createTraitProfile(temperament: Temperament): TraitProfile {
   const traitFlags: string[] = [];
   const moodMultipliers: Record<string, number> = {};
   const personalityMultipliers: Record<string, number> = {};
+  const moodLevels: Record<string, number> = {};
 
   for (const definition of TRAIT_DEFINITIONS) {
     const value = temperament[definition.temperamentKey];
@@ -166,6 +167,11 @@ export function createTraitProfile(temperament: Temperament): TraitProfile {
     traitFlags.push(definition.id);
     if (definition.multipliers.mood) {
       mergeMultiplierMap(moodMultipliers, definition.multipliers.mood);
+      for (const key of Object.keys(definition.multipliers.mood)) {
+        if (!(key in moodLevels)) {
+          moodLevels[key] = 0;
+        }
+      }
     }
     if (definition.multipliers.personality) {
       mergeMultiplierMap(personalityMultipliers, definition.multipliers.personality);
@@ -183,7 +189,7 @@ export function createTraitProfile(temperament: Temperament): TraitProfile {
   return {
     traitFlags,
     multipliers,
-    moodLevels: { ...moodMultipliers },
+    moodLevels,
   };
 }
 
