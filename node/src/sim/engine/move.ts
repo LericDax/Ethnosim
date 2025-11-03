@@ -18,6 +18,9 @@ import {
 
 type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
+const CAREGIVER_ANCHOR_RADIUS = 9;
+const CAREGIVER_ANCHOR_RADIUS_SQ = CAREGIVER_ANCHOR_RADIUS * CAREGIVER_ANCHOR_RADIUS;
+
 export interface MovementTarget {
   x: number;
   y: number;
@@ -621,6 +624,11 @@ function applyBehaviorResult(
 }
 
 function resolveAnchorTarget(agent: MovableAgent, context: MovementContext): MovementTarget | null {
+  const dependentAnchor = findDependentInfantAnchor(agent, context);
+  if (dependentAnchor) {
+    return dependentAnchor;
+  }
+
   if (agent.movement.target) {
     return agent.movement.target;
   }
@@ -684,6 +692,27 @@ function getAnchorForAgent(
     return { x: input.city.x, y: input.city.y };
   }
   return { x: input.agent.homeX, y: input.agent.homeY };
+}
+
+function findDependentInfantAnchor(agent: MovableAgent, context: MovementContext): MovementTarget | null {
+  for (const other of context.agentsById.values()) {
+    if (other.id === agent.id || other.lifeStage !== 'baby') {
+      continue;
+    }
+    const dependent = other as MovableAgent & { parents?: string[] | undefined };
+    const isCaregiver =
+      dependent.caregiverId === agent.id ||
+      (Array.isArray(dependent.parents) && dependent.parents.includes(agent.id));
+    if (!isCaregiver) {
+      continue;
+    }
+    const dx = dependent.x - agent.x;
+    const dy = dependent.y - agent.y;
+    if (dx * dx + dy * dy <= CAREGIVER_ANCHOR_RADIUS_SQ) {
+      return { x: dependent.x, y: dependent.y };
+    }
+  }
+  return null;
 }
 
 function pickRandomPointNear(
