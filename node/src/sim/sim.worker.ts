@@ -13,6 +13,7 @@ import {
   type SerializedBrainState,
   type BrainPulseAppearance,
 } from './engine/brain.ts';
+import { createBrainTelemetryCapture, TelemetryRingBuffer } from './telemetry.ts';
 import {
   createInitialMovementState,
   moveAgent,
@@ -88,6 +89,7 @@ import {
   updateRelationshipMultipliers,
 } from './engine/relationships.ts';
 import type { RelationshipState } from './engine/relationships.ts';
+import type { BrainTelemetryPacket } from '@shared/types.ts';
 
 export type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
@@ -528,6 +530,13 @@ interface WorkerTrackAgentMessage {
   id: string | null;
 }
 
+interface WorkerSetTelemetryConfigMessage {
+  type: 'SET_TELEMETRY_CONFIG';
+  sampleInterval?: number | null;
+  flushBatchSize?: number | null;
+  autoFlush?: boolean;
+}
+
 interface WorkerAdjustHousingCapacityMessage {
   type: 'ADJUST_HOUSING_CAPACITY';
   target: 'default' | 'archetype';
@@ -545,11 +554,17 @@ type WorkerMessage =
   | WorkerSetTicksPerUpdateMessage
   | WorkerRequestSnapshotMessage
   | WorkerTrackAgentMessage
+  | WorkerSetTelemetryConfigMessage
   | WorkerAdjustHousingCapacityMessage;
 
 interface WorkerContext {
   postMessage: (data: unknown) => void;
   addEventListener: (type: string, listener: (event: { data: unknown }) => void) => void;
+}
+
+interface WorkerTelemetryPacketMessage {
+  type: 'TELEMETRY_PACKETS';
+  packets: BrainTelemetryPacket[];
 }
 
 const LIFE_STAGES: LifeStage[] = ['baby', 'child', 'teen', 'adult'];
@@ -558,6 +573,91 @@ const workerContext: WorkerContext | null =
   typeof self !== 'undefined' && typeof (self as any).postMessage === 'function'
     ? (self as WorkerContext)
     : null;
+
+if (workerContext) {
+  telemetrySettings.autoFlush = true;
+}
+
+export function setTelemetryBuffer(buffer: TelemetryRingBuffer | null): void {
+  telemetryBuffer = buffer;
+  telemetrySampler.nextIndex = 0;
+}
+
+export function configureTelemetry(settings: Partial<TelemetrySettings>): void {
+  if (typeof settings.sampleInterval === 'number' && Number.isFinite(settings.sampleInterval)) {
+    telemetrySettings.sampleInterval = Math.max(0, Math.floor(settings.sampleInterval));
+    telemetrySampler.nextIndex = 0;
+  }
+  if (typeof settings.flushBatchSize === 'number' && Number.isFinite(settings.flushBatchSize)) {
+    const normalized = Math.floor(settings.flushBatchSize);
+    telemetrySettings.flushBatchSize = normalized > 0 ? normalized : 1;
+  }
+  if (typeof settings.autoFlush === 'boolean') {
+    telemetrySettings.autoFlush = settings.autoFlush;
+  }
+}
+
+export function setTrackedAgentId(id: string | null, simulationOverride?: SimulationState | null): void {
+  const normalized = typeof id === 'string' && id.trim().length > 0 ? id.trim() : null;
+  trackedAgentId = normalized;
+  trackedAgentDecision = null;
+  trackedAgentTransition = null;
+
+  if (!normalized) {
+    return;
+  }
+
+  const lookup = simulationOverride ?? state;
+  if (!lookup) {
+    return;
+  }
+
+  const agent = lookup.agents.find((entry) => entry.id === normalized) ?? null;
+  if (!agent) {
+    trackedAgentId = null;
+    return;
+  }
+
+  if (agent.brainDecision) {
+    trackedAgentDecision = cloneBrainDecision(agent.brainDecision);
+    trackedAgentTransition = {
+      from: agent.brainDecision.fromNodeId,
+      to: agent.brainDecision.chosenNodeId,
+    };
+    return;
+  }
+
+  if (agent.brain.lastDecision) {
+    trackedAgentDecision = cloneBrainDecision(agent.brain.lastDecision);
+    trackedAgentTransition = {
+      from: agent.brain.lastDecision.fromNodeId,
+      to: agent.brain.lastDecision.chosenNodeId,
+    };
+  }
+}
+
+function clearTelemetryBuffer(): void {
+  telemetryBuffer?.clear();
+  telemetrySampler.nextIndex = 0;
+}
+
+function flushTelemetryToMainThread(): void {
+  if (!telemetrySettings.autoFlush || !workerContext || !telemetryBuffer) {
+    return;
+  }
+  if (telemetrySettings.flushBatchSize <= 0) {
+    return;
+  }
+  const packets = telemetryBuffer.drain(telemetrySettings.flushBatchSize);
+  if (packets.length === 0) {
+    return;
+  }
+  const message: WorkerTelemetryPacketMessage = {
+    type: 'TELEMETRY_PACKETS',
+    packets,
+  };
+  workerContext.postMessage(message);
+}
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 let state: SimulationState | null = null;
@@ -573,6 +673,24 @@ interface TrackedTransition {
 }
 
 let trackedAgentTransition: TrackedTransition | null = null;
+
+const DEFAULT_TELEMETRY_CAPACITY = 512;
+const DEFAULT_TELEMETRY_SAMPLE_INTERVAL = 60;
+const DEFAULT_TELEMETRY_FLUSH_BATCH = 32;
+
+interface TelemetrySettings {
+  sampleInterval: number;
+  flushBatchSize: number;
+  autoFlush: boolean;
+}
+
+let telemetryBuffer: TelemetryRingBuffer | null = new TelemetryRingBuffer(DEFAULT_TELEMETRY_CAPACITY);
+const telemetrySampler = { nextIndex: 0 };
+const telemetrySettings: TelemetrySettings = {
+  sampleInterval: DEFAULT_TELEMETRY_SAMPLE_INTERVAL,
+  flushBatchSize: DEFAULT_TELEMETRY_FLUSH_BATCH,
+  autoFlush: false,
+};
 
 if (workerContext) {
   workerContext.addEventListener('message', (event) => {
@@ -604,7 +722,14 @@ if (workerContext) {
         postSnapshot();
         break;
       case 'TRACK_AGENT':
-        trackAgent(message.id);
+        setTrackedAgentId(message.id ?? null);
+        break;
+      case 'SET_TELEMETRY_CONFIG':
+        configureTelemetry({
+          sampleInterval: message.sampleInterval ?? undefined,
+          flushBatchSize: message.flushBatchSize ?? undefined,
+          autoFlush: typeof message.autoFlush === 'boolean' ? message.autoFlush : undefined,
+        });
         break;
       case 'ADJUST_HOUSING_CAPACITY':
         adjustHousingCapacity(message);
@@ -650,6 +775,7 @@ function stopSimulation(): void {
   trackedAgentId = null;
   trackedAgentDecision = null;
   trackedAgentTransition = null;
+  clearTelemetryBuffer();
 }
 
 function postSnapshot(): void {
@@ -657,32 +783,6 @@ function postSnapshot(): void {
     return;
   }
   workerContext.postMessage(createSnapshot(state));
-}
-
-function trackAgent(id: string | null): void {
-  if (typeof id === 'string' && id.trim().length > 0) {
-    trackedAgentId = id;
-  } else {
-    trackedAgentId = null;
-  }
-  trackedAgentDecision = null;
-  trackedAgentTransition = null;
-
-  if (trackedAgentId && state) {
-    const agent = state.agents.find((entry) => entry.id === trackedAgentId) ?? null;
-    if (!agent) {
-      trackedAgentId = null;
-      return;
-    }
-
-    if (agent.brainDecision) {
-      trackedAgentDecision = cloneBrainDecision(agent.brainDecision);
-      trackedAgentTransition = {
-        from: agent.brainDecision.fromNodeId,
-        to: agent.brainDecision.chosenNodeId,
-      };
-    }
-  }
 }
 
 function scheduleTickLoop(): void {
@@ -706,6 +806,7 @@ function runSimulationStep(): void {
   for (let i = 0; i < ticksPerUpdate; i += 1) {
     stepSimulationState(state);
   }
+  flushTelemetryToMainThread();
   postSnapshot();
 }
 
@@ -754,6 +855,26 @@ function sanitizeTicksPerUpdate(value: number | undefined): number {
   }
   const clamped = Math.max(1, Math.min(200, Math.floor(value)));
   return clamped;
+}
+
+function resolveSampledAgentId(simulation: SimulationState): string | null {
+  if (!telemetryBuffer) {
+    return null;
+  }
+  if (telemetrySettings.sampleInterval <= 0) {
+    return null;
+  }
+  const agentCount = simulation.agents.length;
+  if (agentCount === 0) {
+    return null;
+  }
+  if (simulation.tick % telemetrySettings.sampleInterval !== 0) {
+    return null;
+  }
+  const index = telemetrySampler.nextIndex % agentCount;
+  telemetrySampler.nextIndex = (telemetrySampler.nextIndex + 1) % Math.max(agentCount, 1);
+  const candidate = simulation.agents[index];
+  return candidate ? candidate.id : null;
 }
 
 function generateRunId(mode: RandomnessMode, seedHint: string): string {
@@ -1124,13 +1245,26 @@ export function stepSimulationState(simulation: SimulationState): void {
   updateThreatMoods(simulation, agentsById);
 
   let trackedAgentFound = false;
+  const sampledAgentId = resolveSampledAgentId(simulation);
 
   simulation.agents.forEach((agent) => {
     const wasTrackedAgent = trackedAgentId === agent.id;
     const previousNodeId = agent.brain.currentNodeId;
+    const isSampledAgent = sampledAgentId !== null && agent.id === sampledAgentId;
+    const telemetryCapture =
+      telemetryBuffer && (wasTrackedAgent || isSampledAgent)
+        ? createBrainTelemetryCapture(telemetryBuffer, {
+            entityId: agent.id,
+            entityType: 'agent',
+            tick: simulation.tick,
+            runId: simulation.randomnessMeta.runId ?? null,
+            reason: wasTrackedAgent ? 'tracked_agent' : 'sampled_interval',
+          })
+        : null;
     const brainResult = tickBrain(agent.brain, agent.brainMultipliers, agent.moods, {
       rng: simulation.rng.tick,
       tick: simulation.tick,
+      telemetry: telemetryCapture ?? undefined,
     });
     agent.brainNodeDuration = brainResult.nodeDuration;
     agent.brainDecision = brainResult.decision;

@@ -216,3 +216,42 @@ export interface SnapshotLeadershipSummary {
   city?: SnapshotLeader[];
   updated_at_tick?: number;
 }
+
+export type BrainTelemetryEntityType = 'agent' | 'house' | 'city';
+
+export interface BrainTelemetryMultipliers {
+  mood: number;
+  personality: number;
+  demand: number;
+  relationship: number;
+}
+
+export interface BrainTelemetryCandidate {
+  node_id: string;
+  desirability: number;
+  base_weight: number;
+  adjusted_weight: number;
+  plasticity_delta: number;
+  base_frequency: number;
+  attention_score: number;
+  total_multiplier: number;
+  gate_multiplier: number;
+  multipliers: BrainTelemetryMultipliers;
+  tags?: string[];
+}
+
+export interface BrainTelemetryPacket {
+  type: 'brain_evaluation';
+  tick: number;
+  entity_id: string;
+  entity_type: BrainTelemetryEntityType;
+  brain_id: string;
+  from_node_id: string;
+  to_node_id: string | null;
+  node_duration: number;
+  node_timer_before: number;
+  node_timer_after: number;
+  run_id?: string | null;
+  reason?: string | null;
+  candidates: BrainTelemetryCandidate[];
+}
