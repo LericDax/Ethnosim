@@ -17,6 +17,19 @@ function getAdultAgent(simulation: ReturnType<typeof createSimulationState>): Ag
   return adult;
 }
 
+function getBabyAgent(
+  simulation: ReturnType<typeof createSimulationState>,
+  predicate?: (agent: AgentState) => boolean,
+): AgentState {
+  const baby = simulation.agents.find(
+    (agent) => agent.lifeStage === 'baby' && (!predicate || predicate(agent)),
+  );
+  if (!baby) {
+    throw new Error('Expected at least one baby agent in simulation');
+  }
+  return baby;
+}
+
 describe('housing mood pressures', () => {
   it('increases the unhoused mood and pushes adults toward building housing tasks', () => {
     const simulation = createSimulationState({
@@ -38,22 +51,34 @@ describe('housing mood pressures', () => {
     adult.brainDecision = null;
 
     const moodLevels: number[] = [];
+    const baby = getBabyAgent(
+      simulation,
+      (agent) => agent.caregiverId === adult.id || agent.parents.includes(adult.id),
+    );
+    baby.x = adult.x;
+    baby.y = adult.y;
+    const babyFearDuringBuild: number[] = [];
     let buildDwellingChosen = false;
 
     for (let i = 0; i < 60; i += 1) {
       stepSimulationState(simulation);
       const currentMood = adult.moods?.unhoused ?? 0;
       moodLevels.push(currentMood);
+      const babyFear = baby.moods?.fear ?? 0;
       if (
         adult.brain.currentNodeId === 'BuildDwelling' ||
         adult.brainDecision?.chosenNodeId === 'BuildDwelling'
       ) {
         buildDwellingChosen = true;
+        babyFearDuringBuild.push(babyFear);
       }
     }
 
     expect(moodLevels[0]).toBeGreaterThan(0);
     expect(moodLevels[moodLevels.length - 1]).toBeGreaterThan(moodLevels[0]);
+    expect(babyFearDuringBuild.length).toBeGreaterThan(0);
+    const maxBabyFearDuringBuild = Math.max(...babyFearDuringBuild);
+    expect(maxBabyFearDuringBuild).toBeLessThan(1);
     expect(buildDwellingChosen).toBe(true);
   });
 

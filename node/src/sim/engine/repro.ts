@@ -325,6 +325,7 @@ function createNewborn(simulation: SimulationState, parent: AgentState): AgentSt
     temperament,
     traitFlags: [...traitProfile.traitFlags],
     moods: buildInitialMoodStateFromProfile(traitProfile),
+    caregiverProximityGraceTicks: 0,
     houseId: parent.houseId,
     carriedResources: createResourceBundle(),
     resourceActivity: null,

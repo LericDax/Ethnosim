@@ -58,6 +58,7 @@ export interface SerializedAgentState {
   temperament: AgentState['temperament'];
   traitFlags: string[];
   moods: Record<string, number>;
+  caregiverProximityGraceTicks: number;
   houseId: string | null;
   carriedResources: AgentState['carriedResources'];
   resourceActivity: AgentState['resourceActivity'];
@@ -311,6 +312,7 @@ function serializeAgent(agent: AgentState): SerializedAgentState {
     temperament: { ...agent.temperament },
     traitFlags: [...agent.traitFlags],
     moods: { ...agent.moods },
+    caregiverProximityGraceTicks: agent.caregiverProximityGraceTicks,
     houseId: agent.houseId ?? null,
     carriedResources: cloneBundle(agent.carriedResources),
     resourceActivity: cloneAgentResourceActivity(agent.resourceActivity),

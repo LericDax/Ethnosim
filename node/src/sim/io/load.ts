@@ -363,6 +363,7 @@ function restoreAgent(serialized: SerializedAgentState): AgentState {
     temperament: { ...serialized.temperament },
     traitFlags: [...serialized.traitFlags],
     moods: { ...serialized.moods },
+    caregiverProximityGraceTicks: serialized.caregiverProximityGraceTicks ?? 0,
     houseId: serialized.houseId,
     carriedResources: ensureResourceBundle(cloneBundle(serialized.carriedResources)),
     resourceActivity: cloneAgentResourceActivity(serialized.resourceActivity),

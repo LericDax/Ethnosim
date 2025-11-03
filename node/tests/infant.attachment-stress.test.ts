@@ -56,4 +56,36 @@ describe('infant attachment stress', () => {
 
     expect(fearActivated).toBe(true);
   });
+
+  it('keeps fear low when caregivers remain functionally close', () => {
+    const simulation = createSimulationState({
+      agentCount: 4,
+      worldSize: [32, 32],
+      seed: 'infant-attachment-grace',
+    });
+
+    const baby = getBaby(simulation);
+    const caregiverId = baby.caregiverId ?? baby.parents[0];
+    if (!caregiverId) {
+      throw new Error('Expected baby to have a caregiver');
+    }
+    const caregiver = simulation.agents.find((agent) => agent.id === caregiverId);
+    if (!caregiver) {
+      throw new Error('Expected to find caregiver agent');
+    }
+
+    baby.x = 10;
+    baby.y = 10;
+    caregiver.x = baby.x + 7;
+    caregiver.y = baby.y;
+
+    const fearTrace: number[] = [];
+    for (let i = 0; i < 24; i += 1) {
+      stepSimulationState(simulation);
+      fearTrace.push(baby.moods?.fear ?? 0);
+    }
+
+    const peakFear = Math.max(...fearTrace);
+    expect(peakFear).toBeLessThan(1);
+  });
 });
