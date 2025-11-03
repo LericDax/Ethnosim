@@ -20,6 +20,10 @@ type LifeStage = 'baby' | 'child' | 'teen' | 'adult';
 
 const CAREGIVER_ANCHOR_RADIUS = 9;
 const CAREGIVER_ANCHOR_RADIUS_SQ = CAREGIVER_ANCHOR_RADIUS * CAREGIVER_ANCHOR_RADIUS;
+const FEAR_MOOD_NAME = 'fear';
+const ALERT_MOOD_NAME = 'alert';
+const FEAR_BEHAVIOR_THRESHOLD = 0.35;
+const SHELTER_REACH_MIN = 1.2;
 
 export interface MovementTarget {
   x: number;
@@ -55,6 +59,7 @@ export interface MovableAgent {
   traitFlags: string[];
   movement: MovementState;
   relationships: RelationshipState;
+  moods?: Record<string, number>;
 }
 
 export interface MovementContext {
@@ -77,6 +82,9 @@ interface MovementBehaviorScoreInput {
   cityResourceNeeds: ResourceBundle;
   context: MovementContext;
   relationships: RelationshipSummary;
+  moods: Record<string, number>;
+  fear: number;
+  alert: number;
 }
 
 interface RelationshipSummary {
@@ -449,6 +457,11 @@ function buildBehaviorInput(
   }
 
   const relationships = summarizeRelationships(agent, house, context.city, context);
+  const moods = typeof agent.moods === 'object' && agent.moods ? agent.moods : {};
+  const fearMood = Number((moods as Record<string, number>)[FEAR_MOOD_NAME]);
+  const alertMood = Number((moods as Record<string, number>)[ALERT_MOOD_NAME]);
+  const fear = Number.isFinite(fearMood) ? Math.max(0, fearMood) : 0;
+  const alert = Number.isFinite(alertMood) ? Math.max(0, alertMood) : 0;
 
   return {
     agent,
@@ -462,6 +475,9 @@ function buildBehaviorInput(
     cityResourceNeeds: context.city ? cloneResourceBundle(context.city.resourceNeeds) : cloneResourceBundle(),
     context,
     relationships,
+    moods,
+    fear,
+    alert,
   };
 }
 
@@ -729,6 +745,52 @@ function pickRandomPointNear(
   return clampPosition(world, x, y);
 }
 
+function resolveShelterTarget(
+  agent: MovableAgent,
+  input: MovementBehaviorScoreInput,
+  context: MovementContext,
+  stream: RngStream,
+): { target: MovementTarget; reach: number; linger: number } {
+  const caregiver = agent.caregiverId ? context.agentsById.get(agent.caregiverId) ?? null : null;
+  if (caregiver) {
+    return {
+      target: { x: caregiver.x, y: caregiver.y },
+      reach: Math.max(SHELTER_REACH_MIN, 1.1),
+      linger: 4 + Math.floor(stream.nextFloat() * 3),
+    };
+  }
+
+  if (input.house) {
+    const baseRadius = Math.max(SHELTER_REACH_MIN, input.house.radius * 0.75);
+    const offset = Math.max(0.4, baseRadius * (0.35 + stream.nextFloat() * 0.4));
+    const angle = stream.nextFloat() * Math.PI * 2;
+    const x = input.house.x + Math.cos(angle) * offset;
+    const y = input.house.y + Math.sin(angle) * offset;
+    return {
+      target: clampPosition(context.world, x, y),
+      reach: Math.max(SHELTER_REACH_MIN, baseRadius * 1.05),
+      linger: 5 + Math.floor(stream.nextFloat() * 3),
+    };
+  }
+
+  if (input.city) {
+    const reach = Math.max(SHELTER_REACH_MIN, input.city.radius * 0.8 + 1.5);
+    const target = clampPosition(context.world, input.city.x, input.city.y);
+    return {
+      target,
+      reach,
+      linger: 5 + Math.floor(stream.nextFloat() * 3),
+    };
+  }
+
+  const anchor = getAnchorForAgent(input, context);
+  return {
+    target: clampPosition(context.world, anchor.x, anchor.y),
+    reach: Math.max(SHELTER_REACH_MIN, 1.6 + agent.explorationBias * 0.5),
+    linger: 3 + Math.floor(stream.nextFloat() * 2),
+  };
+}
+
 function buildPatrolLoop(
   anchor: MovementTarget,
   radius: number,
@@ -946,6 +1008,68 @@ function coerceNumber(value: unknown, fallback: number): number {
   }
   return fallback;
 }
+
+registerMovementBehavior({
+  id: 'seek-shelter',
+  score({ metadata, tags, fear, agent, relationships }) {
+    const isFearNode = metadata.id === 'HideWhenScared' || metadata.id === 'FearScream';
+    const hasFearTag = tags.includes('fear') || tags.includes('safety');
+    let score = 0;
+    if (fear > FEAR_BEHAVIOR_THRESHOLD) {
+      score += 0.8 + fear * 0.9;
+    } else if (isFearNode || hasFearTag) {
+      score += 0.35 + fear * 0.5;
+    }
+    if (isFearNode) {
+      score += 0.6;
+    }
+    if (agent.lifeStage === 'child') {
+      score += fear * 0.6 + 0.25;
+    } else if (agent.lifeStage === 'teen') {
+      score += fear * 0.2;
+    }
+    if (relationships.houseTrust > 0.5 && agent.houseId) {
+      score += 0.15;
+    }
+    return score;
+  },
+  initialize(agent, state, context, stream, input) {
+    const shelter = resolveShelterTarget(agent, input, context, stream);
+    return {
+      target: shelter.target,
+      timer: 6 + Math.floor(stream.nextFloat() * 4),
+      lingerTicks: shelter.linger,
+      data: { safeReach: shelter.reach, safeLinger: shelter.linger },
+    };
+  },
+  update(agent, state, context, stream, input) {
+    let target = state.target;
+    const reach = Math.max(SHELTER_REACH_MIN, coerceNumber(state.data.safeReach, 2));
+    if (!target || state.timer <= 0 || !isWithinWorld(context.world, target)) {
+      const shelter = resolveShelterTarget(agent, input, context, stream);
+      state.data.safeReach = shelter.reach;
+      state.data.safeLinger = shelter.linger;
+      return {
+        target: shelter.target,
+        timer: 6 + Math.floor(stream.nextFloat() * 4),
+        lingerTicks: shelter.linger,
+      };
+    }
+
+    const reachSq = reach * reach;
+    if (isCloseTo(agent, target, reachSq)) {
+      const lingerBase = Math.max(1, Math.floor(coerceNumber(state.data.safeLinger, 3)));
+      const lingerTicks = Math.max(lingerBase, state.lingerTicks);
+      if (input.fear <= FEAR_BEHAVIOR_THRESHOLD * 0.75) {
+        const remaining = Math.max(0, lingerTicks - 1);
+        return { target, lingerTicks: remaining, satisfied: remaining <= 0 };
+      }
+      return { target, lingerTicks, timer: 4 };
+    }
+
+    return { target };
+  },
+});
 
 registerMovementBehavior({
   id: 'wander',

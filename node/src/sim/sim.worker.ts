@@ -26,6 +26,7 @@ import {
   getResourceStock,
   harvestResource,
   tickWorldResources,
+  type TerrainType,
   type WorldState,
 } from './engine/world.ts';
 import { handleReproduction, matchReproductivePartners } from './engine/repro.ts';
@@ -227,6 +228,16 @@ const FEAR_MOOD_MAX = 3;
 const ALERT_MOOD_MAX = 2;
 const FEAR_ALERT_SCALE = 0.6;
 const FEAR_RESPONSE_EPSILON = 1e-3;
+const BORDER_WILDLIFE_THRESHOLD = 0.52;
+const BORDER_WILDLIFE_SCALE = 0.95;
+const BORDER_WILDLIFE_TERRAIN_SCALE: Record<string, number> = {
+  forest: 1,
+  plains: 0.65,
+  town: 0.35,
+};
+const CAREGIVER_ABSENCE_SAFE_RADIUS = 5.5;
+const CAREGIVER_ABSENCE_MAX_RADIUS = 11;
+const CAREGIVER_ABSENCE_SCALE = 0.95;
 const INFANT_ATTACHMENT_RADIUS = 6;
 const INFANT_ATTACHMENT_RADIUS_SQ = INFANT_ATTACHMENT_RADIUS * INFANT_ATTACHMENT_RADIUS;
 const INFANT_ATTACHMENT_GRACE_RADIUS = INFANT_ATTACHMENT_RADIUS * 1.5;
@@ -1384,7 +1395,11 @@ function updateThreatMoods(simulation: SimulationState, agentsById: Map<string, 
         ? computeInfantAttachmentStress(agent, simulation, agentsById)
         : 0;
     const hostilityThreat = computeNearbyHostility(agent, agentsById);
-    const threatLevel = Math.min(FEAR_MOOD_MAX, hostilityThreat + attachmentStress);
+    const environmentalThreat = computeEnvironmentalThreat(agent, simulation, agentsById);
+    const threatLevel = Math.min(
+      FEAR_MOOD_MAX,
+      hostilityThreat + attachmentStress + environmentalThreat,
+    );
     const rawCurrentFear = agent.moods[FEAR_MOOD_KEY];
     const currentFear =
       Number.isFinite(rawCurrentFear) && (rawCurrentFear as number) > 0
@@ -1439,6 +1454,138 @@ function updateThreatMoods(simulation: SimulationState, agentsById: Map<string, 
       delete agent.moods[ALERT_MOOD_KEY];
     }
   }
+}
+
+function computeEnvironmentalThreat(
+  agent: AgentState,
+  simulation: SimulationState,
+  agentsById: Map<string, AgentState>,
+): number {
+  const world = simulation.world;
+  const tileX = Math.max(0, Math.min(world.width - 1, Math.floor(agent.x)));
+  const tileY = Math.max(0, Math.min(world.height - 1, Math.floor(agent.y)));
+  const tileIndex = tileY * world.width + tileX;
+  const terrain = world.terrain.tiles[tileIndex] ?? 'plains';
+  const tileSeed = computeTileThreatSeed(world, tileX, tileY);
+
+  const wildlifeThreat = computeWildlifeThreat(agent, world, terrain, simulation.tick, tileSeed);
+  const caregiverThreat =
+    agent.lifeStage === 'child'
+      ? computeCaregiverAbsenceThreat(agent, simulation, agentsById, tileSeed)
+      : 0;
+
+  return Math.min(FEAR_MOOD_MAX, wildlifeThreat + caregiverThreat);
+}
+
+function computeTileThreatSeed(world: WorldState, tileX: number, tileY: number): number {
+  const base = `${world.climateSeed.toFixed(6)}:${tileX},${tileY}`;
+  return hashToUnit(base);
+}
+
+function computeWildlifeThreat(
+  agent: AgentState,
+  world: WorldState,
+  terrain: TerrainType | string,
+  tick: number,
+  tileSeed: number,
+): number {
+  const dx = agent.x - world.centerX;
+  const dy = agent.y - world.centerY;
+  const maxRadius = Math.hypot(world.centerX, world.centerY) || 1;
+  const distanceRatio = Math.min(1, Math.hypot(dx, dy) / maxRadius);
+  if (distanceRatio <= BORDER_WILDLIFE_THRESHOLD) {
+    return 0;
+  }
+
+  const distanceScale = Math.min(1, (distanceRatio - BORDER_WILDLIFE_THRESHOLD) / (1 - BORDER_WILDLIFE_THRESHOLD));
+  const terrainScale = BORDER_WILDLIFE_TERRAIN_SCALE[terrain] ?? BORDER_WILDLIFE_TERRAIN_SCALE.plains;
+  const pulseBase = tileSeed * Math.PI * 2;
+  const fastCycle = 0.5 + 0.5 * Math.sin(pulseBase + tick * 0.08);
+  const slowCycle = 0.5 + 0.5 * Math.sin(pulseBase * 0.5 + tick * 0.0125);
+  const pulse = Math.min(1, fastCycle * 0.6 + slowCycle * 0.4);
+  return distanceScale * terrainScale * BORDER_WILDLIFE_SCALE * pulse;
+}
+
+function computeCaregiverAbsenceThreat(
+  agent: AgentState,
+  simulation: SimulationState,
+  agentsById: Map<string, AgentState>,
+  tileSeed: number,
+): number {
+  if (!agent.caregiverId && (!agent.parents || agent.parents.length === 0) && !agent.houseId) {
+    return 0;
+  }
+
+  const candidateIds = new Set<string>();
+  if (agent.caregiverId) {
+    candidateIds.add(agent.caregiverId);
+  }
+  for (const parentId of agent.parents ?? []) {
+    if (parentId) {
+      candidateIds.add(parentId);
+    }
+  }
+
+  if (candidateIds.size === 0 && agent.houseId) {
+    for (const other of simulation.agents) {
+      if (other.id === agent.id || other.houseId !== agent.houseId) {
+        continue;
+      }
+      if (other.lifeStage === 'adult' || other.lifeStage === 'teen') {
+        candidateIds.add(other.id);
+      }
+    }
+  }
+
+  if (candidateIds.size === 0) {
+    return 0;
+  }
+
+  let minDistanceSq = Number.POSITIVE_INFINITY;
+  for (const candidateId of candidateIds) {
+    const caregiver = agentsById.get(candidateId);
+    if (!caregiver) {
+      continue;
+    }
+    const dx = caregiver.x - agent.x;
+    const dy = caregiver.y - agent.y;
+    const distanceSq = dx * dx + dy * dy;
+    if (distanceSq < minDistanceSq) {
+      minDistanceSq = distanceSq;
+    }
+  }
+
+  if (!Number.isFinite(minDistanceSq)) {
+    return 0;
+  }
+
+  const distance = Math.sqrt(minDistanceSq);
+  if (distance <= CAREGIVER_ABSENCE_SAFE_RADIUS) {
+    return 0;
+  }
+
+  const absenceRatio = Math.min(
+    1,
+    (distance - CAREGIVER_ABSENCE_SAFE_RADIUS) /
+      Math.max(1, CAREGIVER_ABSENCE_MAX_RADIUS - CAREGIVER_ABSENCE_SAFE_RADIUS),
+  );
+  if (absenceRatio <= 0) {
+    return 0;
+  }
+
+  const agentSeed = hashToUnit(agent.id);
+  const oscillation = 0.5 + 0.5 * Math.sin((agentSeed + tileSeed) * Math.PI * 6 + simulation.tick * 0.12);
+  return absenceRatio * CAREGIVER_ABSENCE_SCALE * oscillation;
+}
+
+function hashToUnit(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i) & 0xff;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const normalized = (hash >>> 0) & 0xffffffff;
+  return normalized / 0xffffffff;
 }
 
 function computeInfantAttachmentStress(
