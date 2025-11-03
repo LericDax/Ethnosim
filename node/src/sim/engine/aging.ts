@@ -23,7 +23,7 @@ export const STAGE_BASE_SPEED: Record<LifeStage, number> = {
 export const STAGE_LIMITS: Record<LifeStage, number | null> = {
   baby: 200,
   child: 400,
-  teen: 400,
+  teen: 560,
   adult: null,
 };
 
