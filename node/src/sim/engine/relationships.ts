@@ -35,6 +35,9 @@ const MAX_EVENT_LOG = 16;
 const RELATIONSHIP_DECAY = 0.015;
 const MIN_EFFECT_THRESHOLD = 1e-3;
 const WEIGHT_CLAMP = 2;
+const DEMAND_MOOD_MAX = 3;
+const DEMAND_MOOD_MIN = 0;
+const DEMAND_MOOD_EPSILON = 1e-3;
 
 export function createInitialRelationshipState(): RelationshipState {
   return {
@@ -244,6 +247,22 @@ export function registerDemandPressure(
     conflict ? 'demandConflict' : 'leadership',
     `${scope}:demand`,
   );
+
+  const isTeen = agent.lifeStage === 'teen';
+  const isAdult = agent.lifeStage === 'adult';
+  if (isTeen || isAdult) {
+    const loyaltyFocus = isTeen ? 1.35 : 1.15;
+    const homeFocus = isAdult ? 1.4 : 0.95;
+    const dutyFocus = isAdult ? 1.3 : 1.05;
+    const conflictPenalty = conflict ? 0.75 : 1;
+    const loyaltyScope = scope === 'city' ? 1.1 : 0.85;
+    const homeScope = scope === 'house' ? 1.4 : 0.7;
+    const dutyScope = scope === 'house' ? 1.15 : 1;
+
+    applyDemandMoodPulse(agent, 'loyalty', intensity * 0.18 * loyaltyFocus * loyaltyScope * conflictPenalty);
+    applyDemandMoodPulse(agent, 'home', intensity * 0.22 * homeFocus * homeScope);
+    applyDemandMoodPulse(agent, 'duty', intensity * 0.2 * dutyFocus * dutyScope * conflictPenalty);
+  }
 }
 
 export function registerPregnancyBond(
@@ -502,6 +521,37 @@ function clampWeight(value: number): number {
   }
   if (value < -WEIGHT_CLAMP) {
     return -WEIGHT_CLAMP;
+  }
+  return value;
+}
+
+function applyDemandMoodPulse(agent: AgentState, key: string, delta: number): void {
+  if (!Number.isFinite(delta) || Math.abs(delta) < DEMAND_MOOD_EPSILON) {
+    return;
+  }
+  if (!agent.moods) {
+    agent.moods = {};
+  }
+  const current = Number.isFinite(agent.moods[key]) ? Number(agent.moods[key]) : 0;
+  const next = clampDemandMood(current + delta);
+  if (next <= DEMAND_MOOD_EPSILON) {
+    if (key in agent.moods) {
+      delete agent.moods[key];
+    }
+    return;
+  }
+  agent.moods[key] = next;
+}
+
+function clampDemandMood(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (value < DEMAND_MOOD_MIN) {
+    return DEMAND_MOOD_MIN;
+  }
+  if (value > DEMAND_MOOD_MAX) {
+    return DEMAND_MOOD_MAX;
   }
   return value;
 }

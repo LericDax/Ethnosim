@@ -31,6 +31,10 @@ const HOUSE_MIND_ID = 'HouseMind_v1';
 const HOUSE_NODE_DURATION = 12;
 const CITY_MIND_ID = 'UrbanMind_v1';
 const CITY_RADIUS_FACTOR = 0.35;
+const DEMAND_MEMORY_DECAY = 0.72;
+const DEMAND_MIN_THRESHOLD = 1.02;
+const DEMAND_POPULATION_SCALE = 0.2;
+const DEMAND_PRESSURE_SCALE = 0.24;
 
 export type HousePreferredMode = 'ratio' | 'fixed' | 'none';
 
@@ -855,13 +859,8 @@ export function updateCollectiveDemands(
   const agentMap = new Map<string, HouseAssignableAgent>();
   for (const agent of agents) {
     agentMap.set(agent.id, agent);
-    if (!agent.brainMultipliers.demand) {
-      agent.brainMultipliers.demand = {};
-    } else {
-      for (const key of Object.keys(agent.brainMultipliers.demand)) {
-        delete agent.brainMultipliers.demand[key];
-      }
-    }
+    const demandMultipliers = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
+    decayDemandMultiplierMap(demandMultipliers);
   }
   const agentMapFull = agentMap as unknown as Map<string, AgentState>;
   const cityPressure = new Map<string, number>();
@@ -901,8 +900,9 @@ export function updateCollectiveDemands(
         continue;
       }
       const demand = agent.brainMultipliers.demand ?? (agent.brainMultipliers.demand = {});
-      applyDemandMultipliers(demand, city.activeDemand);
-      applyDemandMultipliers(demand, city.leaderDirectives);
+      const scale = resolveDemandScale(cityEligibleAgents.length, cityDemandIntensity * 0.1);
+      applyDemandMultipliers(demand, city.activeDemand, scale);
+      applyDemandMultipliers(demand, city.leaderDirectives, scale);
       if (cityDemandIntensity > 0) {
         cityPressure.set(agent.id, cityDemandIntensity);
       }
@@ -922,6 +922,15 @@ export function updateCollectiveDemands(
       continue;
     }
 
+    const eligiblePopulation = house.members.reduce((count, memberId) => {
+      const candidate = agentMap.get(memberId);
+      if (candidate && HOUSE_ELIGIBLE_STAGES.includes(candidate.lifeStage)) {
+        return count + 1;
+      }
+      return count;
+    }, 0);
+    const demandPopulation = eligiblePopulation > 0 ? eligiblePopulation : Math.min(2, house.members.length);
+    const demandScaleBase = resolveDemandScale(demandPopulation, house.capacityPressure);
     const houseDemandIntensity =
       sumDemandWeights(template) + sumDemandWeights(house.leaderDirectives);
     const houseLeader = resolveLeaderAgent(house.leaders, agentMapFull, house.primaryLeaderId);
@@ -934,8 +943,8 @@ export function updateCollectiveDemands(
       }
       const memberAgent = agent as AgentState;
       const demand = memberAgent.brainMultipliers.demand ?? (memberAgent.brainMultipliers.demand = {});
-      applyDemandMultipliers(demand, template);
-      applyDemandMultipliers(demand, house.leaderDirectives);
+      applyDemandMultipliers(demand, template, demandScaleBase);
+      applyDemandMultipliers(demand, house.leaderDirectives, demandScaleBase * 1.1);
       memberAgents.push(memberAgent);
 
       const cityIntensity = cityPressure.get(memberAgent.id) ?? 0;
@@ -1604,15 +1613,67 @@ function computeTotalNeed(needs: ResourceBundle | null | undefined): number {
   return total;
 }
 
+function decayDemandMultiplierMap(map: Record<string, number> | null | undefined): void {
+  if (!map) {
+    return;
+  }
+  for (const key of Object.keys(map)) {
+    const value = Number(map[key]);
+    if (!Number.isFinite(value)) {
+      delete map[key];
+      continue;
+    }
+    const deviation = value - 1;
+    if (Math.abs(deviation) < 1e-3) {
+      delete map[key];
+      continue;
+    }
+    const decayed = 1 + deviation * DEMAND_MEMORY_DECAY;
+    if (decayed <= DEMAND_MIN_THRESHOLD) {
+      delete map[key];
+    } else {
+      map[key] = decayed;
+    }
+  }
+}
+
+function resolveDemandScale(population: number, pressure = 0): number {
+  if (!Number.isFinite(population) || population <= 2) {
+    const pressureBoost = pressure > 0 ? 1 + Math.min(1.5, pressure * DEMAND_PRESSURE_SCALE) : 1;
+    return Math.max(1, pressureBoost);
+  }
+  const extraPopulation = Math.max(0, population - 2);
+  const populationBoost = 1 + Math.min(2.5, extraPopulation * DEMAND_POPULATION_SCALE);
+  const pressureBoost = pressure > 0 ? 1 + Math.min(1.5, pressure * DEMAND_PRESSURE_SCALE) : 1;
+  return Math.max(1, populationBoost * pressureBoost);
+}
+
 function applyDemandMultipliers(
   target: Record<string, number>,
   multipliers: Record<string, number>,
+  scale = 1,
 ): void {
+  if (!multipliers) {
+    return;
+  }
+  const normalizedScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
   for (const [tag, multiplier] of Object.entries(multipliers)) {
     if (!Number.isFinite(multiplier)) {
       continue;
     }
     const current = target[tag] ?? 1;
-    target[tag] = current * multiplier;
+    const delta = multiplier - 1;
+    if (Math.abs(delta) < 1e-4) {
+      continue;
+    }
+    const effective = 1 + delta * normalizedScale;
+    const next = current * effective;
+    if (next <= DEMAND_MIN_THRESHOLD) {
+      if (tag in target) {
+        delete target[tag];
+      }
+      continue;
+    }
+    target[tag] = next;
   }
 }
