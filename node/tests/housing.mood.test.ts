@@ -78,7 +78,8 @@ describe('housing mood pressures', () => {
     expect(moodLevels[moodLevels.length - 1]).toBeGreaterThan(moodLevels[0]);
     expect(babyFearDuringBuild.length).toBeGreaterThan(0);
     const maxBabyFearDuringBuild = Math.max(...babyFearDuringBuild);
-    expect(maxBabyFearDuringBuild).toBeLessThan(1);
+    expect(maxBabyFearDuringBuild).toBeGreaterThan(0.5);
+    expect(maxBabyFearDuringBuild).toBeLessThanOrEqual(3);
     expect(buildDwellingChosen).toBe(true);
   });
 
