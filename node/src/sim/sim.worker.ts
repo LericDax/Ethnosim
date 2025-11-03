@@ -198,6 +198,15 @@ const RESOURCE_HARVEST_RATES: Record<ResourceType, number> = {
   forage: 1.1,
   ore: 0.85,
 };
+const HOUSE_RESOURCE_NEED_SCALE = 1.3;
+const HOUSE_RESOURCE_NEED_BASE = 0;
+const CITY_RESOURCE_NEED_SCALE = 1.18;
+const CITY_RESOURCE_NEED_BASE = 0;
+const HOUSE_RESOURCE_FOCUS_WEIGHT = 1.45;
+const CITY_RESOURCE_FOCUS_WEIGHT = 1.05;
+const HOUSE_RESOURCE_REWARD_SCALE = 1.28;
+const CITY_RESOURCE_REWARD_SCALE = 1.05;
+const RESOURCE_REWARD_BASE = 0.02;
 const RESOURCE_DELIVERY_RADIUS_BUFFER = 2.5;
 const UNHOUSED_MOOD_KEY = 'unhoused';
 const UNHOUSED_MOOD_INCREASE_RATE = 0.12;
@@ -1428,6 +1437,22 @@ function computeNearbyHostility(
 }
 
 
+function amplifyResourceNeeds(bundle: ResourceBundle | null | undefined, scale: number, base: number): void {
+  if (!bundle) {
+    return;
+  }
+  for (const type of RESOURCE_TYPES) {
+    const value = getResourceAmount(bundle, type);
+    if (value <= 0) {
+      continue;
+    }
+    const intensity = value * value;
+    const boosted = clamp01(value + intensity * (scale - 1) + base);
+    bundle[type] = boosted;
+  }
+}
+
+
 function processResourceEconomy(simulation: SimulationState): void {
   tickWorldResources(simulation.world);
 
@@ -1435,10 +1460,21 @@ function processResourceEconomy(simulation: SimulationState): void {
     return;
   }
 
+  const agentMap = new Map<string, AgentState>();
+  for (const agent of simulation.agents) {
+    agent.carriedResources = createResourceBundle(agent.carriedResources);
+    agent.resourceActivity = null;
+    agentMap.set(agent.id, agent);
+  }
+
   const houseMap = new Map<string, HouseState>();
   for (const house of simulation.houses) {
     house.stockpiles = ensureResourceBundle(house.stockpiles);
     house.resourceNeeds = ensureResourceBundle(house.resourceNeeds);
+    const hasInfantMember = house.members.some((memberId) => agentMap.get(memberId)?.lifeStage === 'baby');
+    const needScale = hasInfantMember ? 1 : HOUSE_RESOURCE_NEED_SCALE;
+    const needBase = hasInfantMember ? 0 : HOUSE_RESOURCE_NEED_BASE;
+    amplifyResourceNeeds(house.resourceNeeds, needScale, needBase);
     if (!house.construction) {
       house.construction = {
         active: false,
@@ -1450,18 +1486,12 @@ function processResourceEconomy(simulation: SimulationState): void {
     houseMap.set(house.id, house);
   }
 
-  const agentMap = new Map<string, AgentState>();
-  for (const agent of simulation.agents) {
-    agent.carriedResources = createResourceBundle(agent.carriedResources);
-    agent.resourceActivity = null;
-    agentMap.set(agent.id, agent);
-  }
-
   const newHouses: HouseState[] = [];
   const city = simulation.city;
   if (city) {
     city.stockpiles = ensureResourceBundle(city.stockpiles);
     city.resourceNeeds = ensureResourceBundle(city.resourceNeeds);
+    amplifyResourceNeeds(city.resourceNeeds, CITY_RESOURCE_NEED_SCALE, CITY_RESOURCE_NEED_BASE);
   }
 
   for (const agent of simulation.agents) {
@@ -1505,9 +1535,17 @@ function handleAgentResourceActions(
     if (normalized <= 0) {
       return;
     }
+    let multiplier = 1;
+    if (house) {
+      multiplier += getResourceAmount(house.resourceNeeds, type) * HOUSE_RESOURCE_REWARD_SCALE;
+    }
+    if (city) {
+      multiplier += getResourceAmount(city.resourceNeeds, type) * CITY_RESOURCE_REWARD_SCALE;
+    }
+    const scaledMagnitude = Math.min(1, normalized * multiplier + RESOURCE_REWARD_BASE);
     registerDecisionOutcome(agent.brain, {
       category: 'resource',
-      magnitude: normalized,
+      magnitude: scaledMagnitude,
       sign: amount >= 0 ? 1 : -1,
       fromNodeId: activeDecision.fromNodeId,
       toNodeId: activeDecision.chosenNodeId,
@@ -1690,10 +1728,10 @@ function determineAgentResourceFocus(
   for (const type of RESOURCE_TYPES) {
     let score = 0;
     if (house) {
-      score += getResourceAmount(house.resourceNeeds, type) * 1.1;
+      score += getResourceAmount(house.resourceNeeds, type) * HOUSE_RESOURCE_FOCUS_WEIGHT;
     }
     if (city) {
-      score += getResourceAmount(city.resourceNeeds, type) * 0.9;
+      score += getResourceAmount(city.resourceNeeds, type) * CITY_RESOURCE_FOCUS_WEIGHT;
     }
     if (carried && carried.type === type) {
       score += carried.amount * 0.5;

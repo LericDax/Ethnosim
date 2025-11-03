@@ -2,8 +2,20 @@
   "version": 1,
   "name": "AdultMind_v1",
   "nodes": [
-    { "id": "Gather", "base_freq": 1.0, "duration": 6, "tags": ["work", "outward"] },
-    { "id": "Stockpile", "base_freq": 1.0, "duration": 6, "tags": ["home", "inward"] },
+    {
+      "id": "Gather",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["work", "outward"],
+      "pulse_budget_scale": 1.05
+    },
+    {
+      "id": "Stockpile",
+      "base_freq": 1.0,
+      "duration": 6,
+      "tags": ["home", "inward"],
+      "pulse_budget_scale": 1.02
+    },
     {
       "id": "Socialize",
       "base_freq": 1.0,
@@ -13,8 +25,20 @@
       "charge_leak": 0.98,
       "pulse_budget_scale": 0.9
     },
-    { "id": "BuildDwelling", "base_freq": 0.8, "duration": 6, "tags": ["home", "build", "work"] },
-    { "id": "Patrol", "base_freq": 0.8, "duration": 6, "tags": ["work", "outward", "guard", "patrol"] },
+    {
+      "id": "BuildDwelling",
+      "base_freq": 0.8,
+      "duration": 6,
+      "tags": ["home", "build", "work"],
+      "pulse_budget_scale": 1.04
+    },
+    {
+      "id": "Patrol",
+      "base_freq": 0.8,
+      "duration": 6,
+      "tags": ["work", "outward", "guard", "patrol"],
+      "pulse_budget_scale": 1.06
+    },
     { "id": "MarkTerritory", "base_freq": 0.6, "duration": 6, "tags": ["outward", "guard"] },
     { "id": "Wander", "base_freq": 1.0, "duration": 6, "tags": ["outward", "wander"] },
     {
@@ -29,22 +53,25 @@
   ],
   "edges": [
     ["Gather", "Stockpile", 1.0],
-    ["Gather", "Wander", 0.6],
-    ["Stockpile", "Socialize", 0.8],
-    ["Stockpile", "BuildDwelling", 0.6],
-    ["Socialize", "Wander", 0.8],
-    ["Socialize", "Gather", 0.6],
-    ["BuildDwelling", "Patrol", 0.7],
-    ["BuildDwelling", "Rest", 0.7],
+    ["Gather", "Wander", 0.48],
+    ["Stockpile", "Gather", 0.7],
+    ["Stockpile", "Socialize", 0.72],
+    ["Stockpile", "BuildDwelling", 0.85],
+    ["Socialize", "Wander", 0.45],
+    ["Socialize", "Gather", 0.72],
+    ["Socialize", "BuildDwelling", 0.35],
+    ["BuildDwelling", "Patrol", 0.85],
+    ["BuildDwelling", "Rest", 0.82],
     ["Patrol", "MarkTerritory", 0.8],
-    ["Patrol", "Rest", 0.5],
-    ["MarkTerritory", "Patrol", 0.6],
-    ["MarkTerritory", "Rest", 0.5],
-    ["Wander", "Gather", 0.8],
-    ["Wander", "Socialize", 0.6],
+    ["Patrol", "Rest", 0.68],
+    ["MarkTerritory", "Patrol", 0.7],
+    ["MarkTerritory", "Rest", 0.58],
+    ["Wander", "Gather", 0.85],
+    ["Wander", "Socialize", 0.35],
     ["Wander", "Rest", 0.4],
     ["Rest", "Gather", 0.6],
-    ["Rest", "Socialize", 0.6]
+    ["Rest", "Socialize", 0.6],
+    ["Rest", "BuildDwelling", 0.3]
   ],
   "start_node": "Gather"
 }
