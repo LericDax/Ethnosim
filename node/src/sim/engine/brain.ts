@@ -4,6 +4,11 @@ import childMindRaw from '@shared/brains/ChildMind_v1.json?raw';
 import houseMindRaw from '@shared/brains/HouseMind_v1.json?raw';
 import teenMindRaw from '@shared/brains/TeenMind_v1.json?raw';
 import urbanMindRaw from '@shared/brains/UrbanMind_v1.json?raw';
+import type {
+  BrainTelemetryCandidate,
+  BrainTelemetryEntityType,
+  BrainTelemetryPacket,
+} from '@shared/types.ts';
 import { JUMP_EDGE_DEFINITIONS } from './traits.ts';
 import type { RngStream } from './rng.ts';
 import {
@@ -1672,10 +1677,20 @@ export interface BrainTickResult {
   decision: BrainDecision | null;
 }
 
+export interface BrainTickTelemetryCapture {
+  targetId: string;
+  targetType: BrainTelemetryEntityType;
+  tick: number;
+  runId?: string | null;
+  reason?: string | null;
+  record: (packet: BrainTelemetryPacket) => void;
+}
+
 export interface BrainTickContext {
   rng?: RngStream | null;
   tick?: number;
   pulsePalette?: BrainPulsePalette | null;
+  telemetry?: BrainTickTelemetryCapture | null;
 }
 
 export function tickBrain(
@@ -1685,27 +1700,75 @@ export function tickBrain(
   context: BrainTickContext = {},
 ): BrainTickResult {
   const brain = requireBrain(state.brainId);
+  const sourceNodeId = state.currentNodeId;
+  const initialNodeTimer = state.nodeTimer;
+  const telemetryCapture = context.telemetry ?? null;
   advancePlasticityState(state.plasticity);
   updateJumpEdges(state, brain, multipliers, moodLevels);
   refreshDynamicEdgeCache(state);
   let decision: BrainDecision | null = null;
-  const metadata = requireNode(brain, state.currentNodeId);
+  const metadata = requireNode(brain, sourceNodeId);
   const effectiveMultipliers = createEffectiveMultipliers(state.brainId, multipliers, moodLevels);
   updateContextEmbedding(state, brain, effectiveMultipliers, metadata);
-  const candidates = evaluateCandidates(brain, state, state.currentNodeId, effectiveMultipliers);
+  const candidates = evaluateCandidates(brain, state, sourceNodeId, effectiveMultipliers);
+  let telemetryCandidates: BrainTelemetryCandidate[] | null = null;
+  if (telemetryCapture) {
+    telemetryCandidates = candidates.map((candidate) => ({
+      node_id: candidate.nodeId,
+      desirability: candidate.desirability,
+      base_weight: candidate.baseWeight,
+      adjusted_weight: candidate.edgeWeight,
+      plasticity_delta: candidate.plasticityAdjustment,
+      base_frequency: candidate.baseFrequency,
+      attention_score: candidate.attentionScore,
+      total_multiplier: candidate.totalMultiplier,
+      gate_multiplier: Math.min(candidate.moodMultiplier, candidate.demandMultiplier),
+      multipliers: {
+        mood: candidate.moodMultiplier,
+        personality: candidate.personalityMultiplier,
+        demand: candidate.demandMultiplier,
+        relationship: candidate.relationshipMultiplier,
+      },
+      tags: [...(candidate.tags ?? [])],
+    } satisfies BrainTelemetryCandidate));
+  }
+
+  const emitTelemetry = (decisionSnapshot: BrainDecision | null, nodeDuration: number): void => {
+    if (!telemetryCapture) {
+      return;
+    }
+    const chosenNodeId = decisionSnapshot?.chosenNodeId ?? null;
+    const packet: BrainTelemetryPacket = {
+      type: 'brain_evaluation',
+      tick: Number.isFinite(telemetryCapture.tick) ? telemetryCapture.tick : context.tick ?? 0,
+      entity_id: telemetryCapture.targetId,
+      entity_type: telemetryCapture.targetType,
+      brain_id: state.brainId,
+      from_node_id: sourceNodeId,
+      to_node_id: chosenNodeId,
+      node_duration: nodeDuration,
+      node_timer_before: initialNodeTimer,
+      node_timer_after: state.nodeTimer,
+      run_id: telemetryCapture.runId ?? null,
+      reason: telemetryCapture.reason ?? null,
+      candidates: telemetryCandidates ?? [],
+    };
+    telemetryCapture.record(packet);
+  };
 
   if (candidates.length === 0) {
     if (state.nodeTimer > 0) {
       state.nodeTimer = Math.max(0, state.nodeTimer - 1);
     } else {
-      resetNodeTimer(state, state.currentNodeId);
+      resetNodeTimer(state, sourceNodeId);
       decision = {
-        fromNodeId: state.currentNodeId,
+        fromNodeId: sourceNodeId,
         candidates: [],
-        chosenNodeId: state.currentNodeId,
+        chosenNodeId: sourceNodeId,
       };
       state.lastDecision = decision;
     }
+    emitTelemetry(decision ?? state.lastDecision, metadata.duration);
     return {
       state,
       nodeDuration: metadata.duration,
@@ -1748,7 +1811,7 @@ export function tickBrain(
 
   const readyTarget = resolveReadyTarget(state, brain, candidates);
   if (readyTarget) {
-    const fromNodeId = state.currentNodeId;
+    const fromNodeId = sourceNodeId;
     const nextNodeId = readyTarget.nodeId;
     decision = {
       fromNodeId,
@@ -1762,7 +1825,7 @@ export function tickBrain(
   } else {
     const bestCandidate = candidates[0];
     if (bestCandidate) {
-      const fromNodeId = state.currentNodeId;
+      const fromNodeId = sourceNodeId;
       const gateMultiplier = Math.min(bestCandidate.moodMultiplier, bestCandidate.demandMultiplier);
       const timerExpired = state.nodeTimer <= 0;
       const suppressedByMultipliers = gateMultiplier < LOW_MULTIPLIER_FAILURE_THRESHOLD;
@@ -1778,6 +1841,7 @@ export function tickBrain(
     }
   }
 
+  emitTelemetry(decision ?? state.lastDecision, metadata.duration);
   return {
     state,
     nodeDuration: metadata.duration,
