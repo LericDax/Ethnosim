@@ -22,20 +22,49 @@
       "charge_capacity": 1.25,
       "charge_leak": 0.98,
       "pulse_budget_scale": 0.88
+    },
+    {
+      "id": "PlanFuture",
+      "base_freq": 1.0,
+      "duration": 7,
+      "tags": ["future", "strategy", "bonding"],
+      "charge_capacity": 1.2,
+      "charge_leak": 0.975,
+      "pulse_budget_scale": 0.86
+    },
+    {
+      "id": "Recover",
+      "base_freq": 0.95,
+      "duration": 7,
+      "tags": ["rest", "healing", "loyalty"],
+      "charge_capacity": 1.18,
+      "charge_leak": 0.977,
+      "pulse_budget_scale": 0.9
     }
   ],
   "edges": [
     ["ProveMyself", "ShowLoyalty", 0.7],
-    ["ProveMyself", "SneakAndHoard", 0.6],
-    ["ProveMyself", "ChallengeBorder", 0.8],
-    ["ShowLoyalty", "ProveMyself", 0.7],
+    ["ProveMyself", "SneakAndHoard", 0.55],
+    ["ProveMyself", "ChallengeBorder", 0.75],
+    ["ProveMyself", "Recover", 0.45],
+    ["ShowLoyalty", "ProveMyself", 0.65],
     ["ShowLoyalty", "CourtAlly", 0.7],
+    ["ShowLoyalty", "PlanFuture", 0.6],
     ["SneakAndHoard", "ProveMyself", 0.6],
-    ["SneakAndHoard", "ChallengeBorder", 0.7],
-    ["ChallengeBorder", "ProveMyself", 0.6],
-    ["ChallengeBorder", "CourtAlly", 0.5],
-    ["CourtAlly", "ShowLoyalty", 0.8],
-    ["CourtAlly", "ProveMyself", 0.6]
+    ["SneakAndHoard", "ChallengeBorder", 0.65],
+    ["SneakAndHoard", "Recover", 0.5],
+    ["ChallengeBorder", "Recover", 0.75],
+    ["ChallengeBorder", "CourtAlly", 0.45],
+    ["ChallengeBorder", "PlanFuture", 0.5],
+    ["Recover", "ChallengeBorder", 0.6],
+    ["Recover", "ShowLoyalty", 0.55],
+    ["Recover", "ProveMyself", 0.45],
+    ["CourtAlly", "PlanFuture", 0.8],
+    ["CourtAlly", "ShowLoyalty", 0.7],
+    ["CourtAlly", "ProveMyself", 0.5],
+    ["PlanFuture", "CourtAlly", 0.78],
+    ["PlanFuture", "ShowLoyalty", 0.6],
+    ["PlanFuture", "ProveMyself", 0.5]
   ],
   "start_node": "ProveMyself"
 }

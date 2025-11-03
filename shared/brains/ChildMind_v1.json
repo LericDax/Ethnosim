@@ -14,6 +14,15 @@
     { "id": "ExploreNearby", "base_freq": 1.0, "duration": 6, "tags": ["outward", "curiosity"] },
     { "id": "FetchSmallThings", "base_freq": 1.0, "duration": 6, "tags": ["help", "duty"] },
     {
+      "id": "ShadowMentor",
+      "base_freq": 1.0,
+      "duration": 7,
+      "tags": ["social", "learning", "duty"],
+      "charge_capacity": 1.15,
+      "charge_leak": 0.978,
+      "pulse_budget_scale": 0.88
+    },
+    {
       "id": "HideWhenScared",
       "base_freq": 1.0,
       "duration": 6,
@@ -30,19 +39,40 @@
       "charge_capacity": 1.1,
       "charge_leak": 0.97,
       "pulse_budget_scale": 0.92
+    },
+    {
+      "id": "PracticeRitual",
+      "base_freq": 1.0,
+      "duration": 7,
+      "tags": ["ritual", "practice", "memory"],
+      "charge_capacity": 1.18,
+      "charge_leak": 0.976,
+      "pulse_budget_scale": 0.9
     }
   ],
   "edges": [
-    ["FollowCaregiver", "ExploreNearby", 0.7],
-    ["FollowCaregiver", "FetchSmallThings", 0.6],
+    ["FollowCaregiver", "ExploreNearby", 0.55],
+    ["FollowCaregiver", "FetchSmallThings", 0.5],
+    ["FollowCaregiver", "ShadowMentor", 0.6],
+    ["FollowCaregiver", "PracticeRitual", 0.4],
+    ["ExploreNearby", "ShadowMentor", 0.45],
     ["ExploreNearby", "HideWhenScared", 0.5],
-    ["ExploreNearby", "ImitateRitual", 0.4],
-    ["ExploreNearby", "FollowCaregiver", 0.6],
-    ["FetchSmallThings", "FollowCaregiver", 0.8],
-    ["FetchSmallThings", "ExploreNearby", 0.6],
+    ["ExploreNearby", "ImitateRitual", 0.35],
+    ["ExploreNearby", "FollowCaregiver", 0.45],
+    ["FetchSmallThings", "ShadowMentor", 0.5],
+    ["FetchSmallThings", "FollowCaregiver", 0.7],
+    ["FetchSmallThings", "ExploreNearby", 0.55],
+    ["ShadowMentor", "ExploreNearby", 0.55],
+    ["ShadowMentor", "PracticeRitual", 0.6],
+    ["ShadowMentor", "FetchSmallThings", 0.45],
+    ["ShadowMentor", "FollowCaregiver", 0.5],
     ["HideWhenScared", "FollowCaregiver", 1.0],
-    ["ImitateRitual", "FollowCaregiver", 0.8],
-    ["ImitateRitual", "ExploreNearby", 0.6]
+    ["ImitateRitual", "PracticeRitual", 0.65],
+    ["ImitateRitual", "FollowCaregiver", 0.6],
+    ["ImitateRitual", "ExploreNearby", 0.5],
+    ["PracticeRitual", "ImitateRitual", 0.7],
+    ["PracticeRitual", "ShadowMentor", 0.55],
+    ["PracticeRitual", "FollowCaregiver", 0.45]
   ],
   "start_node": "FollowCaregiver"
 }

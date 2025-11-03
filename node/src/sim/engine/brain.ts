@@ -909,7 +909,24 @@ function combineMoodMultipliers(
   return Object.keys(combined).length > 0 ? combined : undefined;
 }
 
+function applyMultiplierScale(map: Record<string, number>, tag: string, scale: number): boolean {
+  if (!map || !tag) {
+    return false;
+  }
+  if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 1e-6) {
+    return false;
+  }
+  const existing = map[tag];
+  if (typeof existing === 'number' && Number.isFinite(existing) && existing > 0) {
+    map[tag] = existing * scale;
+  } else {
+    map[tag] = scale;
+  }
+  return true;
+}
+
 function createEffectiveMultipliers(
+  brainId: string,
   multipliers: BrainMultiplierSet = {},
   moodLevels: Record<string, number> = {},
 ): BrainMultiplierSet {
@@ -926,6 +943,59 @@ function createEffectiveMultipliers(
   }
   if (multipliers.relationship) {
     effective.relationship = { ...multipliers.relationship };
+  }
+
+  if (brainId === 'TeenMind_v1') {
+    let relationshipMap = effective.relationship;
+    let demandMap = effective.demand;
+    let relationshipChanged = false;
+    let demandChanged = false;
+
+    const loyaltyNeed = Number(moodLevels.loyalty);
+    if (Number.isFinite(loyaltyNeed) && loyaltyNeed > 0.45) {
+      const capped = Math.min(2.5, Math.max(0, loyaltyNeed));
+      const bondingScale = 1 + capped * 0.25;
+      const futureScale = 1 + capped * 0.22;
+      const loyaltyScale = 1 + capped * 0.2;
+      if (!relationshipMap) {
+        relationshipMap = {};
+      }
+      relationshipChanged =
+        applyMultiplierScale(relationshipMap, 'bonding', bondingScale) || relationshipChanged;
+      relationshipChanged =
+        applyMultiplierScale(relationshipMap, 'future_pair', futureScale) || relationshipChanged;
+      relationshipChanged =
+        applyMultiplierScale(relationshipMap, 'loyalty', loyaltyScale) || relationshipChanged;
+    }
+
+    const dutyNeed = Number(moodLevels.duty);
+    if (Number.isFinite(dutyNeed) && dutyNeed > 0.45) {
+      const capped = Math.min(2.5, Math.max(0, dutyNeed));
+      const dutyScale = 1 + capped * 0.3;
+      const dutyRelationshipScale = 1 + capped * 0.18;
+      const borderScale = 1 + capped * 0.22;
+      const resolveScale = 1 + capped * 0.16;
+      if (!demandMap) {
+        demandMap = {};
+      }
+      demandChanged = applyMultiplierScale(demandMap, 'duty', dutyScale) || demandChanged;
+      if (!relationshipMap) {
+        relationshipMap = {};
+      }
+      relationshipChanged =
+        applyMultiplierScale(relationshipMap, 'duty', dutyRelationshipScale) || relationshipChanged;
+      relationshipChanged =
+        applyMultiplierScale(relationshipMap, 'border', borderScale) || relationshipChanged;
+      relationshipChanged =
+        applyMultiplierScale(relationshipMap, 'resolve', resolveScale) || relationshipChanged;
+    }
+
+    if (relationshipChanged && relationshipMap) {
+      effective.relationship = relationshipMap;
+    }
+    if (demandChanged && demandMap) {
+      effective.demand = demandMap;
+    }
   }
   return effective;
 }
@@ -1066,7 +1136,7 @@ export function refreshBrainContext(
   moodLevels: Record<string, number> = {},
 ): void {
   const brain = requireBrain(state.brainId);
-  const effectiveMultipliers = createEffectiveMultipliers(multipliers, moodLevels);
+  const effectiveMultipliers = createEffectiveMultipliers(state.brainId, multipliers, moodLevels);
   updateContextEmbedding(state, brain, effectiveMultipliers);
 }
 
@@ -1076,7 +1146,7 @@ export function previewBrainCandidates(
   moodLevels: Record<string, number> = {},
 ): BrainDecisionFactor[] {
   const brain = requireBrain(state.brainId);
-  const effectiveMultipliers = createEffectiveMultipliers(multipliers, moodLevels);
+  const effectiveMultipliers = createEffectiveMultipliers(state.brainId, multipliers, moodLevels);
   updateContextEmbedding(state, brain, effectiveMultipliers);
   return evaluateCandidates(brain, state, state.currentNodeId, effectiveMultipliers);
 }
@@ -1620,7 +1690,7 @@ export function tickBrain(
   refreshDynamicEdgeCache(state);
   let decision: BrainDecision | null = null;
   const metadata = requireNode(brain, state.currentNodeId);
-  const effectiveMultipliers = createEffectiveMultipliers(multipliers, moodLevels);
+  const effectiveMultipliers = createEffectiveMultipliers(state.brainId, multipliers, moodLevels);
   updateContextEmbedding(state, brain, effectiveMultipliers, metadata);
   const candidates = evaluateCandidates(brain, state, state.currentNodeId, effectiveMultipliers);
 
