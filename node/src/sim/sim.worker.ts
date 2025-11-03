@@ -140,6 +140,7 @@ export interface AgentState extends MovableAgent, HouseAssignableAgent {
   temperament: Temperament;
   traitFlags: string[];
   moods: Record<string, number>;
+  caregiverProximityGraceTicks: number;
   brainNodeDuration: number;
   carriedResources: ResourceBundle;
   resourceActivity: AgentResourceActivity | null;
@@ -217,6 +218,9 @@ const FEAR_ALERT_SCALE = 0.6;
 const FEAR_RESPONSE_EPSILON = 1e-3;
 const INFANT_ATTACHMENT_RADIUS = 6;
 const INFANT_ATTACHMENT_RADIUS_SQ = INFANT_ATTACHMENT_RADIUS * INFANT_ATTACHMENT_RADIUS;
+const INFANT_ATTACHMENT_GRACE_RADIUS = INFANT_ATTACHMENT_RADIUS * 1.5;
+const INFANT_ATTACHMENT_GRACE_RADIUS_SQ = INFANT_ATTACHMENT_GRACE_RADIUS * INFANT_ATTACHMENT_GRACE_RADIUS;
+const INFANT_ATTACHMENT_GRACE_TICKS = 8;
 const INFANT_ATTACHMENT_SEPARATION_CAP = 2.25;
 const INFANT_ATTACHMENT_STRESS_SCALE = 1.4;
 const INFANT_ATTACHMENT_ORPHAN_STRESS = 1.6;
@@ -920,6 +924,7 @@ function createAgents(
       temperament,
       traitFlags: [...traitProfile.traitFlags],
       moods: buildInitialMoodState(traitProfile),
+      caregiverProximityGraceTicks: 0,
       houseId: null,
       carriedResources: createResourceBundle(),
       resourceActivity: null,
@@ -1300,6 +1305,8 @@ function computeInfantAttachmentStress(
   }
 
   let minDistanceSq = Number.POSITIVE_INFINITY;
+  let hasNearbyCaregiver = false;
+  const grace = Math.max(0, agent.caregiverProximityGraceTicks ?? 0);
   for (const candidateId of candidateIds) {
     const caregiver = agentsById.get(candidateId);
     if (!caregiver) {
@@ -1309,11 +1316,25 @@ function computeInfantAttachmentStress(
     const dy = caregiver.y - agent.y;
     const distanceSq = dx * dx + dy * dy;
     if (distanceSq <= INFANT_ATTACHMENT_RADIUS_SQ) {
+      agent.caregiverProximityGraceTicks = INFANT_ATTACHMENT_GRACE_TICKS;
       return 0;
     }
     if (distanceSq < minDistanceSq) {
       minDistanceSq = distanceSq;
     }
+    if (distanceSq <= INFANT_ATTACHMENT_GRACE_RADIUS_SQ) {
+      hasNearbyCaregiver = true;
+    }
+  }
+
+  if (hasNearbyCaregiver) {
+    agent.caregiverProximityGraceTicks = INFANT_ATTACHMENT_GRACE_TICKS;
+    return 0;
+  }
+
+  if (grace > 0) {
+    agent.caregiverProximityGraceTicks = grace - 1;
+    return 0;
   }
 
   if (!Number.isFinite(minDistanceSq)) {
@@ -1328,6 +1349,7 @@ function computeInfantAttachmentStress(
 
   const normalized = Math.min(INFANT_ATTACHMENT_SEPARATION_CAP, separation / INFANT_ATTACHMENT_RADIUS);
   const stress = normalized * INFANT_ATTACHMENT_STRESS_SCALE;
+  agent.caregiverProximityGraceTicks = 0;
   return Math.min(FEAR_MOOD_MAX, stress);
 }
 
